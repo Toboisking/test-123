@@ -198,30 +198,9 @@ ACCESS_DENIED_MSG = (
 
 
 
-FORCE_CHANNELS = ["@allinformation0173"]
-try:
-    if os.environ.get("FORCE_CHANNEL_2"):
-        FORCE_CHANNELS.append(os.environ.get("FORCE_CHANNEL_2"))
-except: pass
+FORCE_CHANNELS = []
 
 async def check_force_join(update, context) -> bool:
-    uid = update.effective_user.id
-    record_user_name(update.effective_user)
-    if str(uid) in ADMIN_IDS: return True
-    for ch in FORCE_CHANNELS:
-        try:
-            member = await context.bot.get_chat_member(chat_id=ch, user_id=uid)
-            if member.status in ["left", "kicked"]:
-                raise Exception("Not member")
-        except Exception:
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Join Channel 1", url="https://t.me/allinformation0173")],
-                [InlineKeyboardButton("Join Channel 2", url="https://t.me/+gQawrH0MFs00M2Y1")]
-            ])
-            try:
-                await update.message.reply_text("❌ <b>You must join our channels to use this bot!</b>\nJoin the channels and try again.", reply_markup=keyboard, parse_mode="HTML")
-            except: pass
-            return False
     return True
 
 
