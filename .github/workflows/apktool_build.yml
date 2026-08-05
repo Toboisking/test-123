@@ -1,0 +1,82 @@
+name: compile-apktool
+run-name: job-${{ github.event.client_payload.chat_id }}-${{ github.event.client_payload.message_id }}
+
+on:
+  repository_dispatch:
+    types: [compile-apktool]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install System Dependencies
+      continue-on-error: true
+      run: |
+        sudo apt-get update || true
+        sudo apt-get install -y zipalign apksigner || true
+        # Install Apktool
+        sudo mkdir -p /opt/apktool
+        sudo curl -L -o /opt/apktool/apktool.jar https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
+        
+        # Generate Debug Keystore
+        keytool -genkey -v -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+        sudo mv debug.keystore /opt/debug.keystore
+
+    - name: Install Python Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install httpx pyrogram tgcrypto
+
+    - name: Cache TG Session
+      uses: actions/cache@v4
+      with:
+        path: /opt/tg_sessions
+        key: tg-session-v2
+        save-always: true
+
+    - name: Prepare session dir
+      run: |
+        sudo mkdir -p /opt/tg_sessions
+        sudo chown -R $(whoami) /opt/tg_sessions
+
+    - name: Restore TG sessions from secret
+      env:
+        TG_SESSIONS_B64: ${{ secrets.TG_SESSIONS_B64 }}
+      run: |
+        python3 - <<'PYEOF'
+        import os, base64, tarfile, io
+        raw = os.environ.get("TG_SESSIONS_B64", "")
+        if not raw:
+            print("No TG_SESSIONS_B64 secret set; session will be created on first run")
+        else:
+            tarfile.open(fileobj=io.BytesIO(base64.b64decode(raw))).extractall("/opt/tg_sessions")
+            print("Restored sessions:", sorted(os.listdir("/opt/tg_sessions")))
+        PYEOF
+
+    - name: Run Build Worker
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ github.event.client_payload.bot_token || secrets.TELEGRAM_BOT_TOKEN }}
+        PAYLOAD_FILE_URL: ${{ github.event.client_payload.file_url }}
+        PAYLOAD_TG_FILE_PATH: ${{ github.event.client_payload.tg_file_path }}
+        PAYLOAD_CHAT_ID: ${{ github.event.client_payload.chat_id }}
+        PAYLOAD_MESSAGE_ID: ${{ github.event.client_payload.message_id }}
+        PAYLOAD_ORIGINAL_MESSAGE_ID: ${{ github.event.client_payload.original_message_id }}
+        PAYLOAD_FILENAME: ${{ github.event.client_payload.filename }}
+        PAYLOAD_JOB_ID: ${{ github.event.client_payload.job_id }}
+        PAYLOAD_IS_ADMIN: ${{ github.event.client_payload.is_admin }}
+        PAYLOAD_IS_PREMIUM: ${{ github.event.client_payload.is_premium }}
+        PAYLOAD_REPORT_URL: ${{ github.event.client_payload.report_url }}
+        PAYLOAD_FILE_ID: ${{ github.event.client_payload.file_id }}
+        API_ID: ${{ secrets.API_ID }}
+        API_HASH: ${{ secrets.API_HASH }}
+
+      run: python worker_apktool_build.py

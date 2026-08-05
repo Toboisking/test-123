@@ -1,0 +1,103 @@
+name: decompile-job
+run-name: job-${{ github.event.client_payload.chat_id }}-${{ github.event.client_payload.message_id }}
+# re-register: workflow was stuck in deleted state after history reset
+on:
+  repository_dispatch:
+    types: [decompile-job]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  decompile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Ghidra
+        id: ghidra-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/ghidra
+          key: ghidra-12.1.2-v2
+
+      - name: Get Ghidra
+        if: steps.ghidra-cache.outputs.cache-hit != 'true'
+        run: |
+          if [ -f /opt/ghidra/support/analyzeHeadless ]; then
+            echo "Ghidra already valid at /opt/ghidra"
+            exit 0
+          fi
+          if [ -d /opt/ghidra ]; then
+            echo "stale cache layout, removing"
+            sudo rm -rf /opt/ghidra
+          fi
+          curl -L --retry 3 -o /tmp/ghidra.zip \
+            "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip"
+          sudo unzip -q -o /tmp/ghidra.zip -d /opt
+          ghdir=$(sudo bash -c 'ls -d /opt/ghidra_* 2>/dev/null | head -n1')
+          echo "extracted dir: $ghdir"
+          sudo mv "$ghdir" /opt/ghidra
+          test -f /opt/ghidra/support/analyzeHeadless
+          echo "Ghidra ready"
+          rm /tmp/ghidra.zip
+
+      - name: Cache TG Session
+        uses: actions/cache@v4
+        with:
+          path: /opt/tg_sessions
+          key: tg-session-v2
+          save-always: true
+
+      - name: Prepare session dir
+        run: |
+          sudo mkdir -p /opt/tg_sessions
+          sudo chown -R $(whoami) /opt/tg_sessions
+
+      - name: Restore TG sessions from secret
+        env:
+          TG_SESSIONS_B64: ${{ secrets.TG_SESSIONS_B64 }}
+        run: |
+          python3 - <<'PYEOF'
+          import os, base64, tarfile, io
+          raw = os.environ.get("TG_SESSIONS_B64", "")
+          if not raw:
+              print("No TG_SESSIONS_B64 secret set; session will be created on first run")
+          else:
+              tarfile.open(fileobj=io.BytesIO(base64.b64decode(raw))).extractall("/opt/tg_sessions")
+              print("Restored sessions:", sorted(os.listdir("/opt/tg_sessions")))
+          PYEOF
+
+      - name: Run decompile worker
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ github.event.client_payload.bot_token || secrets.TELEGRAM_BOT_TOKEN }}
+          PAYLOAD_FILE_URL: ${{ github.event.client_payload.file_url }}
+          PAYLOAD_TG_FILE_PATH: ${{ github.event.client_payload.tg_file_path }}
+          PAYLOAD_CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          PAYLOAD_MESSAGE_ID: ${{ github.event.client_payload.message_id }}
+          PAYLOAD_ORIGINAL_MESSAGE_ID: ${{ github.event.client_payload.original_message_id }}
+          PAYLOAD_FILENAME: ${{ github.event.client_payload.filename }}
+          PAYLOAD_JOB_ID: ${{ github.event.client_payload.job_id }}
+          PAYLOAD_IS_ADMIN: ${{ github.event.client_payload.is_admin }}
+          PAYLOAD_IS_PREMIUM: ${{ github.event.client_payload.is_premium }}
+          PAYLOAD_REPORT_URL: ${{ github.event.client_payload.report_url }}
+          PAYLOAD_FILE_ID: ${{ github.event.client_payload.file_id }}
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+
+          JAVA_MAX_MEM: "6G"
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q httpx pyrogram tgcrypto
+          /tmp/venv/bin/python worker.py
+
+

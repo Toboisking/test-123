@@ -1,0 +1,43 @@
+{
+  "approved": [
+    "8052864919",
+    "7249511572",
+    "5185289135",
+    "8776576226",
+    "7433238917"
+  ],
+  "banned": [],
+  "subscriptions": {},
+  "names": {
+    "8052864919": "Codex (@nextsjs)",
+    "7249511572": "OpAbhi\u270c\ufe0f (@OpAbhi01)",
+    "7251749429": "\u25e4\ud835\udde5\ud835\uddd8\ud835\udde9\u25e2 \u30c5\u300c\u13a0\u2c86\u13a0\u300d (@R3V_X)",
+    "1902927750": "\u23e4\u035f\u035f\u035e\u2765\u035c\u0361\ud834\udd1f\u2563\ud80c\udda9\ud83c\udde9\u20ea\u028c\u0365\u0273\u0363\u0273\u036b\u028f \ud83c\udd53\u0362\u028f\u0273\u028c\u0271\u0269\u0255 \ud80c\uddaa\u2620\ufe0e \u1d0d\u0280 \u2718 \u026a\u0274\u1d20\u026a\ud83c\udd62\u026a (@MR_DANNYDYNAMIC_OFFICIAL)",
+    "7433238917": "Steve (@Steves_Lee)",
+    "6684870256": "\u26a1\ufe0e\ud835\udd72\ud835\udd8d\ud835\udd94\ud835\udd98\ud835\udd99 \ud835\udd94\ud835\udd8b \ud835\udd8d\ud835\udd86\ud835\udd88\ud835\udd90\ud835\udd8a\ud835\udd97\ud835\udd98\u26a1\ufe0e (@Ghostofhackers)",
+    "8776576226": "\ud835\ude83\ud835\ude98\ud835\ude9e\ud835\ude9d \ud835\ude73\ud835\ude98\ud835\ude97\ud835\ude97\ud835\ude8e\ud835\ude9b (@ToutDonner)",
+    "5185289135": "- \ud835\udc11 \ud835\uded6 \uaa8e \uaa8e \uaa97 !!",
+    "5421311764": "\ud81a\udcd8 \u20ea \u20ea\uabed\u02f9 \ud835\udd3d\ud835\udd69 \ud80c\udda9\ud835\udddf\u1d00\u1d0bs\u029c\u026a\u1d1b\ud80c\uddaa\u02fc \uabed\u1ab3\u1abc\u0353\ud834\uddbc\uabed\ud834\uddad\u0362\uabed\uabed\u0fd0\ud83e\udd76\u20e4 (@lakshitpatidar)",
+    "8754178763": "Love",
+    "7798184925": "\u0262\u1d0f\u1d0b\u1d1c"
+  },
+  "daily_usage": {
+    "7249511572": {
+      "date": "2026-08-04",
+      "count": 1
+    },
+    "8052864919": {
+      "date": "2026-08-03",
+      "count": 1
+    },
+    "7251749429": {
+      "date": "2026-08-05",
+      "count": 25
+    },
+    "6684870256": {
+      "date": "2026-08-05",
+      "count": 3
+    }
+  },
+  "free_mode": false
+}

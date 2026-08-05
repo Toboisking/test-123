@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment & Secret files
+.env
+.env.*
+*.env
+
+# Local TG session bootstrap (sessions live in GitHub secret TG_SESSIONS_B64)
+sessions/
+make_sessions.py
+value.txt
+
+# Persistent runtime data & logs
+approved_users.json
+*.log
+*.sqlite3
+
+# Temporary & Working directories
+tmp/
+temp/
+*.zip
+*.bin
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE & OS files
+.DS_Store
+.vscode/
+.idea/
