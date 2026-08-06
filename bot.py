@@ -159,10 +159,7 @@ async def queue_worker_loop():
 
 OVER_LIMIT_MSG = (
     "⚠️ <b>File size limit exceeded!</b>\n"
-    "File is {size:.1f} MB — this exceeds the current limit.\n\n"
-    "Limits:\n"
-    "  • .so/.dex — max 100 MB\n"
-    "  • APK/ZIP — max 500 MB\n\n"
+    "File is {size:.1f} MB — max upload limit is 2000 MB (Telegram's 2 GB cap).\n\n"
     "Powered By @Ghostofhackers"
 )
 
@@ -556,7 +553,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📤 <b>Method 1: Direct upload</b>\n"
         "Just send the file directly:\n"
         "  • .exe / .dll / .so / .elf / .apk / .zip\n"
-        "  ⚠️ Upload Limits — .so/.dex ≤100 MB, APK/ZIP ≤500 MB\n\n"
+        "  ⚠️ Upload Limits — up to 2 GB (Telegram max)\n\n"
         "⚡ <b>Features & Engines:</b>\n"
         "  • ⚙️ <b>Ghidra Engine:</b> Full C reconstruction of native files\n"
         "  • ☕ <b>JADX Engine:</b> APK/DEX/Smali → Java Source\n"
@@ -636,7 +633,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 📦 <b>APK Build (Source):</b> Real source ZIP → signed + unsigned APK\n"
         "• 🔏 <b>APK Sign:</b> Re-sign any APK (v1+v2, choose Android 5–16)\n\n"
         "📊 <b>BOT LIMITS & RULES:</b>\n"
-        "• <b>Upload Limits:</b> .so/.dex ≤100 MB, APK/ZIP ≤500 MB\n"
+        "• <b>Upload Limits:</b> up to 2 GB per file (Telegram's max)\n"
         "• <b>ZIP Content Rules:</b> max 5 .so/.dex inside a ZIP\n"
         "• <b>No Daily Quota</b> — unlimited files per day\n"
         "• <b>Server Concurrency:</b> Max 4 active jobs at a time\n\n"
@@ -897,12 +894,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     fname_l = (doc.file_name or "").lower()
     is_small_type = fname_l.endswith((".so", ".dex"))
-    if user_id in ADMIN_IDS:
-        user_max_mb = 2000
-    elif is_premium:
-        user_max_mb = 100 if is_small_type else 500
-    else:
-        user_max_mb = 30 if is_small_type else 200
+    user_max_mb = 2000
 
     size_mb = (doc.file_size or 0) / (1024 * 1024)
     if size_mb > user_max_mb:

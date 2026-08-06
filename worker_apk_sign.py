@@ -32,7 +32,7 @@ REPORT_URL = os.environ.get("PAYLOAD_REPORT_URL", "")
 REPORT_TOKEN = BOT_TOKEN
 SDK_ROOT = os.environ.get("PAYLOAD_SDK_ROOT", "")
 MIN_SDK = os.environ.get("PAYLOAD_MIN_SDK", "")
-MAX_DOWNLOAD_MB = 2000 if IS_ADMIN else 500
+MAX_DOWNLOAD_MB = 2000
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 

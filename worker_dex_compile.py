@@ -31,7 +31,7 @@ USER_ID = os.environ.get("PAYLOAD_USER_ID", CHAT_ID)
 REPORT_URL = os.environ.get("PAYLOAD_REPORT_URL", "")
 REPORT_TOKEN = BOT_TOKEN
 MODE = os.environ.get("PAYLOAD_DEXCOMPILE_MODE", "auto")
-MAX_DOWNLOAD_MB = 2000 if IS_ADMIN else 500
+MAX_DOWNLOAD_MB = 2000
 
 SMALI_JAR = "/opt/smali.jar"
 R8_JAR = "/opt/r8.jar"

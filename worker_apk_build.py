@@ -33,7 +33,7 @@ REPORT_TOKEN = BOT_TOKEN
 SDK_ROOT = os.environ.get("PAYLOAD_SDK_ROOT", "")
 R8_JAR = os.environ.get("PAYLOAD_R8_JAR", "")
 KOTLINC_ROOT = os.environ.get("PAYLOAD_KOTLINC", "")
-MAX_DOWNLOAD_MB = 2000 if IS_ADMIN else 500
+MAX_DOWNLOAD_MB = 2000
 
 JAVA_EXTENSIONS = {".java"}
 KOTLIN_EXTENSIONS = {".kt"}

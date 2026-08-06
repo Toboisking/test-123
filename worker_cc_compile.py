@@ -31,7 +31,7 @@ USER_ID = os.environ.get("PAYLOAD_USER_ID", CHAT_ID)
 REPORT_URL = os.environ.get("PAYLOAD_REPORT_URL", "")
 REPORT_TOKEN = BOT_TOKEN
 NDK_BIN = os.environ.get("PAYLOAD_NDK_BIN", "")
-MAX_DOWNLOAD_MB = 2000 if IS_ADMIN else 500
+MAX_DOWNLOAD_MB = 2000
 
 CC_EXTENSIONS = {".c"}
 CPP_EXTENSIONS = {".cpp", ".cc", ".cxx", ".c++", ".cp"}

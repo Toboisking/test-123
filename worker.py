@@ -36,7 +36,7 @@ REPORT_TOKEN = BOT_TOKEN
 GHIDRA_HOME = Path(os.environ.get("GHIDRA_HOME", "/opt/ghidra"))
 ANALYZE_HEADLESS = GHIDRA_HOME / "support" / "analyzeHeadless"
 SCRIPT_DIR = Path(__file__).resolve().parent / "ghidra_scripts"
-MAX_DOWNLOAD_MB = 2000 if IS_ADMIN else 500
+MAX_DOWNLOAD_MB = 2000
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -548,6 +548,8 @@ async def main():
                     out_files.append((f"{bname}.c", result["c"]))
                 if result["meta"].exists() and result["meta"].stat().st_size > 0:
                     out_files.append((f"{bname}_info.txt", result["meta"]))
+                if not out_files:
+                    log.warning("Ghidra produced no output. tail:\n%s", result.get("tail", "")[:1500])
             except TimeoutError:
                 edit("⏰ Timeout! The file is too big or complex.", keep_button=False)
                 return
@@ -557,7 +559,12 @@ async def main():
                 return
 
         if not out_files:
-            edit("❌ Analysis failed or no output files generated.")
+            tail_snippet = ""
+            try:
+                tail_snippet = (result.get("tail") or "")[-600:]
+            except Exception:
+                pass
+            edit("❌ Analysis failed or no output files generated.\n\n<b>Ghidra log:</b>\n<pre>" + tail_snippet[:900] + "</pre>", parse_mode="HTML", keep_button=False)
             return
 
         edit("📦 Packaging results...")
