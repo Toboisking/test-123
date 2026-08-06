@@ -375,7 +375,7 @@ async def main():
         
         edit("✅ Decompilation complete! Sending ZIP...")
         
-        caption = f"✅ Decompiled <b>{safe_name}</b> with Apktool — Powered By @R3V_X"
+        caption = f"✅ Decompiled <b>{safe_name}</b> with Apktool — Powered By @Ghostofhackers"
         up_last = [0]
         async def on_up(pct: int):
             if pct < up_last[0] or pct - up_last[0] < 2: return

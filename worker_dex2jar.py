@@ -573,9 +573,9 @@ async def main():
             edit("✅ Java Source ready (JADX fallback)! Sending ZIP...")
 
         if out_jar is not None:
-            caption = f"✅ Decompiled <b>{safe_name}</b> to JAR + Java Source — Powered By @R3V_X"
+            caption = f"✅ Decompiled <b>{safe_name}</b> to JAR + Java Source — Powered By @Ghostofhackers"
         else:
-            caption = f"⚠️ dex2jar crashed (too large?) — delivered <b>Java Source</b> via JADX fallback — Powered By @R3V_X"
+            caption = f"⚠️ dex2jar crashed (too large?) — delivered <b>Java Source</b> via JADX fallback — Powered By @Ghostofhackers"
         up_last = [0]
         async def on_up(pct: int):
             if pct < up_last[0] or pct - up_last[0] < 2: return

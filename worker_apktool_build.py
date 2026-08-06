@@ -313,7 +313,7 @@ async def main():
             if signed_apk.exists():
                 zf.write(signed_apk, f"{safe_name}_signed.apk")
 
-        caption = f"✅ Compiled <b>{safe_name}</b> successfully!\\nIncludes both Signed & Unsigned versions. — Powered By @R3V_X"
+        caption = f"✅ Compiled <b>{safe_name}</b> successfully!\\nIncludes both Signed & Unsigned versions. — Powered By @Ghostofhackers"
         up_last = [0]
         async def on_up(pct: int):
             if pct < up_last[0] or pct - up_last[0] < 2: return

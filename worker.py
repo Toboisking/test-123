@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -511,7 +512,7 @@ async def main():
 
         edit("✅ Decompilation complete! Sending ZIP...")
         
-        caption = f"✅ Decompiled <b>{safe_name}</b> with Ghidra — Powered By @R3V_X"
+        caption = f"✅ Decompiled <b>{safe_name}</b> with Ghidra — Powered By @Ghostofhackers"
         up_last = [0]
         async def on_up(pct: int):
             if pct < up_last[0] or pct - up_last[0] < 2: return
