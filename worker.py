@@ -372,6 +372,45 @@ def report_extra_count(extra: int):
         log.warning("Count report failed: %s", e)
 
 
+def _identify_file(file_path: Path) -> str:
+    try:
+        res = subprocess.run(["file", "-b", str(file_path)], capture_output=True, text=True, timeout=30)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception as e:
+        log.warning("file cmd failed: %s", e)
+    try:
+        head = file_path.read_bytes()[:16]
+    except Exception:
+        return "unknown"
+    if head.startswith(b"7z\xbc\xaf\x27\x1c"):
+        return "7z archive"
+    if head[:2] in (b"\x1f\x8b", b"BZ", b"\xfd7zXZ"):
+        return "compressed archive (gz/bz2/xz)"
+    if head.startswith(b"Rar!"):
+        return "rar archive"
+    return "unknown binary"
+
+
+def _extract_other_archive(dest: Path, extract_dir: Path) -> bool:
+    cmds = [
+        ["bsdtar", "-xf", str(dest), "-C", str(extract_dir)],
+        ["tar", "-xf", str(dest), "-C", str(extract_dir)],
+        ["7z", "x", "-y", f"-o{extract_dir}", str(dest)],
+    ]
+    for cmd in cmds:
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+            if res.returncode == 0:
+                log.info("extracted with %s", cmd[0])
+                return True
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            log.warning("%s err: %s", cmd[0], str(e)[:100])
+    return False
+
+
 async def main():
     if not BOT_TOKEN or not CHAT_ID:
         log.error("Missing env TELEGRAM_BOT_TOKEN / PAYLOAD_CHAT_ID")
@@ -537,6 +576,33 @@ async def main():
                             out_files.append((f"{bname}_info.txt", res["meta"]))
                     except Exception as e:
                         log.warning("Batch file %s failed: %s", bin_path.name, e)
+        elif not out_files:
+            # Not a zip — try other archive formats (7z, tar, gz, xz, rar)
+            extract_dir = work_dir / "extracted_other"
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            if _extract_other_archive(dest, extract_dir):
+                candidates = []
+                for root, dirs, files in os.walk(extract_dir):
+                    for f in files:
+                        fp = Path(root) / f
+                        ext = fp.suffix.lower()
+                        if ext in [".so", ".dll", ".exe", ".elf", ".apk", ".bin", ".jar", ".o", ".dylib"] or (not ext and fp.stat().st_size > 1024):
+                            candidates.append(fp)
+                if candidates:
+                    edit(f"📦 <b>Archive Detected!</b> Found {len(candidates)} binary file(s). Extracting & decompiling...", parse_mode="HTML")
+                    for idx, bin_path in enumerate(candidates[:5], start=1):
+                        edit(f"⚙️ <b>Processing ({idx}):</b> <code>{bin_path.name}</code>...", parse_mode="HTML")
+                        try:
+                            res = await asyncio.wait_for(
+                                run_ghidra(bin_path, work_dir / f"analysis_o_{idx}", on_progress), timeout=3600
+                            )
+                            bname = bin_path.stem
+                            if res["c"].exists() and res["c"].stat().st_size > 0:
+                                out_files.append((f"{bname}.c", res["c"]))
+                            if res["meta"].exists() and res["meta"].stat().st_size > 0:
+                                out_files.append((f"{bname}_info.txt", res["meta"]))
+                        except Exception as e:
+                            log.warning("Archive file %s failed: %s", bin_path.name, e)
 
         if not out_files:
             try:
@@ -559,12 +625,18 @@ async def main():
                 return
 
         if not out_files:
+            ftype = _identify_file(dest)
             tail_snippet = ""
             try:
                 tail_snippet = (result.get("tail") or "")[-600:]
             except Exception:
                 pass
-            edit("❌ Analysis failed or no output files generated.\n\n<b>Ghidra log:</b>\n<pre>" + tail_snippet[:900] + "</pre>", parse_mode="HTML", keep_button=False)
+            edit(
+                f"❌ Analysis failed or no output files generated.\n\n"
+                f"📄 <b>File type detected:</b> {ftype[:200]}\n\n"
+                f"<b>Ghidra log:</b>\n<pre>" + tail_snippet[:900] + "</pre>",
+                parse_mode="HTML", keep_button=False
+            )
             return
 
         edit("📦 Packaging results...")
