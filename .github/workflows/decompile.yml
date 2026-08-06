@@ -63,6 +63,12 @@ jobs:
           sudo mkdir -p /opt/tg_sessions
           sudo chown -R $(whoami) /opt/tg_sessions
 
+      - name: Install GDB
+        run: |
+          if ! command -v gdb > /dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq gdb
+          fi
+
       - name: Restore TG sessions from secret
         env:
           TG_SESSIONS_B64: ${{ secrets.TG_SESSIONS_B64 }}
@@ -91,6 +97,7 @@ jobs:
           PAYLOAD_IS_PREMIUM: ${{ github.event.client_payload.is_premium }}
           PAYLOAD_REPORT_URL: ${{ github.event.client_payload.report_url }}
           PAYLOAD_FILE_ID: ${{ github.event.client_payload.file_id }}
+          PAYLOAD_GDB_SCRIPT: ${{ github.event.client_payload.gdb_script }}
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
 

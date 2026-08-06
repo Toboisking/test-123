@@ -28,6 +28,7 @@ IS_PREMIUM = os.environ.get("PAYLOAD_IS_PREMIUM", "False").lower() == "true"
 USER_ID = os.environ.get("PAYLOAD_USER_ID", CHAT_ID)
 REPORT_URL = os.environ.get("PAYLOAD_REPORT_URL", "")
 REPORT_TOKEN = BOT_TOKEN
+GDB_SCRIPT = os.environ.get("PAYLOAD_GDB_SCRIPT", "")
 GHIDRA_HOME = Path(os.environ.get("GHIDRA_HOME", "/opt/ghidra"))
 ANALYZE_HEADLESS = GHIDRA_HOME / "support" / "analyzeHeadless"
 SCRIPT_DIR = Path(__file__).resolve().parent / "ghidra_scripts"
@@ -230,6 +231,42 @@ async def run_ghidra(file_path: Path, work_dir: Path, on_progress) -> dict:
     return {"c": out_c, "meta": out_meta, "tail": "\n".join(tail[-40:]), "returncode": rc}
 
 
+async def run_gdb(file_path: Path, work_dir: Path) -> None:
+    edit("🐞 <b>Running GDB — Connecting to Cloud Server…</b>", parse_mode="HTML")
+    cmds = [c.strip() for c in re.split(r"[;\n]+", GDB_SCRIPT) if c.strip()][:20]
+    if not cmds:
+        cmds = ["info files"]
+    cmdline = ["gdb", "-q", "-batch", "-ex", "set pagination off", "-ex", "set confirm off"]
+    for c in cmds:
+        cmdline += ["-ex", c]
+    cmdline += ["--", str(file_path)]
+    log.info("gdb cmd: %s", " ".join(cmdline))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmdline, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=180)
+    except asyncio.TimeoutError:
+        edit("⏰ GDB timed out (180s). Try simpler commands.")
+        return
+    text = out.decode(errors="replace")
+    log.info("GDB_OUT_LEN=%s HEAD=%s", len(text), text[:300].replace("\n", " | "))
+    if not text.strip():
+        edit("❌ GDB gave no output. Check the command syntax.")
+        return
+    esc = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    if len(text) <= 3500:
+        edit("<pre>" + esc[:3500] + "</pre>", parse_mode="HTML")
+    else:
+        tmp = work_dir / "gdb_output.txt"
+        try:
+            tmp.write_text(text, encoding="utf-8", errors="replace")
+            send_document(tmp, "🐞 <b>GDB output delivered</b> — Powered By @Ghostofhackers", "gdb_output.txt")
+            edit("✅ <b>GDB output sent</b> as file (" + str(len(text)) + " chars).", parse_mode="HTML")
+        except Exception:
+            edit("<pre>" + esc[:3500] + "</pre>", parse_mode="HTML")
+
+
 def send_document(file_path: Path, caption: str, filename: str):
     with open(file_path, "rb") as fh:
         resp = httpx.post(
@@ -381,7 +418,11 @@ async def main():
             edit(f"❌ {e}", keep_button=False)
             return
 
-        edit(f"📥 Downloaded {size/1024/1024:.1f} MB! Starting Ghidra analysis...")
+        edit(f"📥 Downloaded {size/1024/1024:.1f} MB! Starting analysis...")
+
+        if GDB_SCRIPT:
+            await run_gdb(dest, work_dir)
+            return
 
         last = [0, ""]
 

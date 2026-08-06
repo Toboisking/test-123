@@ -63,12 +63,7 @@ def is_allowed(user_id: int) -> bool:
     uid = str(user_id)
     if uid in db.data["banned"]:
         return False
-    # Admins and allowed users from ENV bypass approval
-    if uid in ADMIN_IDS or uid in ALLOWED_USERS:
-        return True
-    if db.data.get("free_mode", False):
-        return True
-    return uid in db.data["approved"]
+    return True
 
 job_queue = asyncio.Queue()
 PENDING_JOBS = {}
@@ -80,35 +75,6 @@ from datetime import date, timedelta
 
 
 def check_daily_limit(user_id: int) -> str | None:
-    uid = str(user_id)
-    is_admin = uid in ADMIN_IDS
-
-    today = date.today()
-    today_iso = today.isoformat()
-    sub = db.data["subscriptions"].get(uid)
-    if sub:
-        try:
-            exp_date = date.fromisoformat(sub["expires_at"])
-            if today > exp_date:
-                db.remove_approved(uid)
-                db.remove_sub(uid)
-                if not is_admin:
-                    return "⚠️ <b>Access Expired!</b>\nYour custom subscription period has ended. Please contact Admin to renew."
-            user_max_files = sub.get("daily_limit", MAX_DAILY_FILES)
-        except Exception:
-            user_max_files = MAX_DAILY_FILES
-    else:
-        user_max_files = MAX_DAILY_FILES
-
-    record = db.data['daily_usage'].get(uid)
-    if record and record["date"] == today_iso:
-        if not is_admin and record["count"] >= user_max_files:
-            return f"⚠️ <b>Daily Limit Reached!</b>\nYou have reached your daily quota of <b>{user_max_files} files</b>. Further uploads will be permitted tomorrow."
-        record["count"] += 1
-    else:
-        db.data['daily_usage'][uid] = {"date": today_iso, "count": 1}
-    db.data["total_files"] = db.data.get("total_files", 0) + 1
-    db.save()
     return None
 
 
@@ -118,8 +84,8 @@ async def enqueue_or_dispatch(msg, status, file_url: str = "", filename: str = "
     active_jobs_timestamps[:] = [t for t in active_jobs_timestamps if now - t < 600]
 
     is_admin = user_id in ADMIN_IDS
-    is_priority = is_admin or user_id in db.data["subscriptions"]
-    is_premium = is_admin or user_id in db.data["subscriptions"]
+    is_priority = is_admin or len(active_jobs_timestamps) < MAX_CONCURRENT_JOBS
+    is_premium = True
 
     if is_priority or len(active_jobs_timestamps) < MAX_CONCURRENT_JOBS:
         active_jobs_timestamps.append(now)
@@ -185,7 +151,7 @@ OVER_LIMIT_MSG = (
     "Limits:\n"
     "  • .so/.dex — Free 30 MB | Premium 100 MB\n"
     "  • APK/ZIP — Free 200 MB | Premium 500 MB\n\n"
-    "Powered By @R3V_X"
+    "Powered By @Ghostofhackers"
 )
 
 
@@ -193,7 +159,7 @@ ACCESS_DENIED_MSG = (
     "🔒 <b>Access Denied</b>\n\n"
     "This bot is private and restricted to approved users only.\n"
     "Contact an Admin or click the button below to request access.\n\n"
-    "👥 <b>Admins:</b> @R3V_X"
+    "👥 <b>Admins:</b> @Ghostofhackers"
 )
 
 
@@ -210,18 +176,18 @@ async def reply_denied(msg, user_id: int = None) -> None:
     if uid and uid in PENDING_REQUESTS:
         text = (
             "⏳ <b>Access Request Pending</b>\n\n"
-            "Your access request has been submitted to the Admins (@R3V_X).\n"
+            "Your access request has been submitted to the Admins (@Ghostofhackers).\n"
             "Please wait for an Admin to review and approve your request."
         )
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👤 Contact Admin", url="https://t.me/R3V_X")]
+            [InlineKeyboardButton("👤 Contact Admin", url="https://t.me/Ghostofhackers")]
         ])
     else:
         text = ACCESS_DENIED_MSG
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("📩 Request Access", callback_data="req_access"),
-                InlineKeyboardButton("👤 Contact Admin", url="https://t.me/R3V_X"),
+                InlineKeyboardButton("👤 Contact Admin", url="https://t.me/Ghostofhackers"),
             ]
         ])
     await msg.reply_text(text, parse_mode=constants.ParseMode.HTML, reply_markup=keyboard)
@@ -278,28 +244,23 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data == "buy_sub":
-        await query.answer("⭐ Ghidra Decompiler Premium Plan (₹99)", show_alert=False)
+        await query.answer("🎉 Totally FREE — no subscription needed!", show_alert=False)
         sub_details = (
-            "⭐ <b>GHIDRA DECOMPILER — PREMIUM SUBSCRIPTION</b>\n"
+            "🎉 <b>GHIDRA DECOMPILER — 100% FREE FOREVER</b>\n"
             "═══════════════════════════════════\n"
-            "💳 <b>PRICE:</b> <b>₹99 ONLY</b>\n\n"
-            "⚡ <b>PREMIUM BENEFITS & FEATURES:</b>\n"
-            "• 📊 <b>Increased Daily Limit:</b> <b>70 Files / Day</b> (vs 30 Free)\n"
-            "• ⭐ <b>Premium Features Included:</b>\n"
-            "• 📦 <b>File Upload Limits:</b> .so/.dex up to <b>100 MB</b> & APK/ZIP up to <b>500 MB</b> (Free: 30 MB / 200 MB)\n"
-            "• 🚀 <b>Priority Fast-Lane Queue:</b> Instant processing during peak load\n"
-            "• 📦 <b>Batch ZIP Decompiler:</b> Premium ZIP — max <b>5 .so/.dex</b> & <b>2 .apk</b> inside\n"
+            "💳 <b>PRICE:</b> <b>₹0 — COMPLETELY FREE</b>\n\n"
+            "⚡ <b>EVERYONE GETS FULL ACCESS:</b>\n"
+            "• 🚀 <b>Unlimited Files / Day</b>\n"
+            "• 📦 <b>Max File Limits:</b> .so/.dex up to <b>100 MB</b> & APK/ZIP up to <b>500 MB</b>\n"
+            "• ⭐ <b>No Subscription, No Payments, No Limits</b>\n"
             "• 📱 <b>APK Engines:</b> JADX (Java Source), dex2jar (JAR+Java), Apktool (XML/Smali) & Compilation Support\n"
-            "• 🔔 <b>Expiry Warnings:</b> Advance 5-day & 1-day renewal alerts\n"
-            "• 🛠️ <b>Dedicated Priority Support</b>\n\n"
+            "• 🛠️ <b>Free Support</b>\n\n"
             "═══════════════════════════════════\n"
-            "💳 <b>BUY / RENEW SUBSCRIPTION (₹99):</b>\n"
-            "Contact Admins to upgrade your account:\n"
-            "👤 <b>Admin:</b> @R3V_X"
+            "👑 <b>Powered By @Ghostofhackers</b>"
         )
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("💬 Contact @R3V_X (₹99)", url="https://t.me/R3V_X"),
+                InlineKeyboardButton("🚀 Start Using Now", url="https://t.me/Ghostofhackers"),
             ]
         ])
         try:
@@ -323,11 +284,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             await query.edit_message_text(
                 "⏳ <b>Access Request Pending</b>\n\n"
-                "Your access request has been submitted to the Admins (@R3V_X).\n"
+                "Your access request has been submitted to the Admins (@Ghostofhackers).\n"
                 "You will receive a notification as soon as an Admin approves your request.",
                 parse_mode=constants.ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("👤 Contact Admin", url="https://t.me/R3V_X")]
+                    [InlineKeyboardButton("👤 Contact Admin", url="https://t.me/Ghostofhackers")]
                 ])
             )
         except Exception:
@@ -448,26 +409,23 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📤 <b>Method 1: Direct upload</b>\n"
         "Just send the file directly:\n"
         "  • .exe / .dll / .so / .elf / .apk / .zip\n"
-        "  ⚠️ Upload Limits — Free: .so/.dex ≤30 MB, APK/ZIP ≤200 MB\n"
-        "  ⭐ Premium: .so/.dex ≤100 MB, APK/ZIP ≤500 MB\n\n"
+        "  ⚠️ Upload Limits — .so/.dex ≤100 MB, APK/ZIP ≤500 MB\n\n"
         "⚡ <b>Features & Engines:</b>\n"
-        "  • ⚙️ <b>Ghidra Engine:</b> Full C reconstruction of native files (Free)\n"
-        "  • 📱 <b>Apktool Engine:</b> APK Decompile & Compile (⭐ Premium)\n"
+        "  • ⚙️ <b>Ghidra Engine:</b> Full C reconstruction of native files\n"
+        "  • 📱 <b>Apktool Engine:</b> APK Decompile & Compile\n"
         "  • 🔍 <b>Smart APK Scanner:</b> Extracts and decompiles Native .so libraries automatically\n"
         "  • ☁️ <b>Cloud Links:</b> Large outputs (>50MB) are uploaded directly to Telegram via MTProto\n"
+        "  • 🐞 <b>GDB Debugger:</b> live commands — info functions, disassemble & more\n"
         "  • Live progress animation (0-100%)\n\n"
-        "⭐ <b>PREMIUM SUBSCRIPTION & UPGRADE (₹99):</b>\n"
-        "  • 🆓 <b>Free Quota:</b> 30 Files / Day — .so/.dex ≤30 MB, APK/ZIP ≤200 MB\n"
-        "  • ⭐ <b>Premium Quota:</b> 70 Files / Day — .so/.dex ≤100 MB, APK/ZIP ≤500 MB\n"
-        "  • 🚀 <b>Priority Fast-Lane Queue Slot</b> (Skip waiting queue)\n"
-        "  • 📦 <b>Multi-File Batch ZIP Decompiler</b> (Premium: max 5 .so/.dex + 2 .apk per ZIP)\n"
+        "🎉 <b>100% FREE — NO SUBSCRIPTION NEEDED:</b>\n"
+        "  • 🆓 <b>Unlimited files / day</b> — no daily quota, no payments\n"
+        "  • 🚀 <b>Multi-File Batch ZIP Decompiler</b> (max 5 .so/.dex + 2 .apk per ZIP)\n"
         "  • 📱 <b>Apktool Engine:</b> Full APK Decompilation & Compilation Support\n"
-        "  • 💳 <b>Price:</b> <b>₹99 Only</b>\n"
-        "  • 💬 <b>To Buy/Renew:</b> Contact @R3V_X\n\n"
-        "🚀 Send a file now! Powered By @R3V_X",
+        "  • 🐞 <b>GDB Debugger:</b> <code>/gdb info functions</code>, <code>/gdb disassemble main</code>\n\n"
+        "🚀 Send a file now! Powered By @Ghostofhackers",
         parse_mode=constants.ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⭐ Buy Premium Plan (₹99)", callback_data="buy_sub")]
+            [InlineKeyboardButton("🎉 Totally Free — No Subscription!", callback_data="buy_sub")]
         ])
     )
 
@@ -507,34 +465,90 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 <b>USER COMMANDS:</b>\n"
         "• <code>/start</code> — Welcome guide and basic usage.\n"
         "• <code>/help</code> — View all commands and bot description.\n"
-        "• <code>/profile</code> — View your profile, daily remaining quota, and server stats.\n"
+        "• <code>/profile</code> — View your profile and server stats.\n"
         "• <code>/myid</code> — Display your Telegram User ID.\n"
+        "• <code>/gdb &lt;cmd&gt;</code> — real GDB debugger commands 🐞\n"
         f"{admin_section}\n\n"
-        "⭐ <b>PREMIUM SUBSCRIPTION BENEFITS (₹99):</b>\n"
-        "• 🆓 <b>Free Quota:</b> 30 files / day — .so/.dex ≤30 MB, APK/ZIP ≤200 MB\n"
-        "• ⭐ <b>Premium Quota:</b> 70 files / day — .so/.dex ≤100 MB, APK/ZIP ≤500 MB\n"
-        "• 🚀 <b>Priority Fast-Lane Queue:</b> Instant execution during peak load\n"
-        "• 📦 <b>Batch Decompiler:</b> Premium — max 5 .so/.dex + 2 .apk per ZIP\n"
+        "🎉 <b>100% FREE — NO SUBSCRIPTION NEEDED:</b>\n"
+        "• 🆓 <b>Unlimited files / day</b> — no daily quota\n"
+        "• 📦 <b>Max File Limits:</b> .so/.dex ≤100 MB, APK/ZIP ≤500 MB\n"
+        "• 🚀 <b>Batch Decompiler:</b> max 5 .so/.dex + 2 .apk per ZIP\n"
         "• 📱 <b>Apktool Engine:</b> Full APK Decompilation & Compilation Support\n"
-        "• 🔔 <b>Expiry Alerts:</b> Automated 5-day & 1-day warning alerts\n\n"
-        "💳 <b>BUY SUBSCRIPTION (₹99):</b>\n"
-        "Contact Admins: <b>@R3V_X</b>\n\n"
+        "• 🐞 <b>GDB Debugger:</b> live commands — info functions, disassemble & more\n\n"
         "📤 <b>DIRECT UPLOAD:</b>\n"
-        "• Send any binary file directly in chat (Limits: .so/.dex 30/100 MB, APK/ZIP 200/500 MB for Free/Premium, Unlimited for Admins).\n\n"
+        "• Send any binary file directly in chat (.so/.dex ≤100 MB, APK/ZIP ≤500 MB).\n\n"
         "📊 <b>BOT LIMITS & RULES:</b>\n"
-        "• <b>Upload Limits:</b> .so/.dex — Free 30 MB, Premium 100 MB | APK/ZIP — Free 200 MB, Premium 500 MB\n"
-        "• <b>ZIP Content Rules:</b> Free — max 1 .so/.dex & no .apk inside; Premium — max 5 .so/.dex & 2 .apk inside\n"
-        "• <b>Daily Quota:</b> 30 files / day (Unlimited for Admins)\n"
+        "• <b>Upload Limits:</b> .so/.dex — 100 MB | APK/ZIP — 500 MB\n"
+        "• <b>ZIP Content Rules:</b> max 5 .so/.dex & 2 .apk inside\n"
         "• <b>Server Concurrency:</b> Max 4 active jobs at a time\n\n"
-        "⚡ <i>Powered By @R3V_X</i>"
+        "🐞 <b>GDB EXAMPLES:</b>\n"
+        "  → <code>/gdb info functions</code>\n"
+        "  → <code>/gdb disassemble main</code>\n"
+        "  → <code>/gdb info files;info functions</code>\n"
+        "  → <code>/gdb info registers</code>\n"
+        "  → <code>/gdb disassemble main &lt;url&gt;</code>\n\n"
+        "🚀 <b>Send a file or a link now!</b>\n"
+        "⚡ <i>Powered By @Ghostofhackers</i>"
     )
     await update.message.reply_text(help_text, parse_mode=constants.ParseMode.HTML, reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("⭐ Buy / Upgrade Subscription", callback_data="buy_sub")]
+        [InlineKeyboardButton("🎉 Totally Free — No Subscription!", callback_data="buy_sub")]
     ]))
 
 
 async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🆔 Your Telegram User ID:\n<code>{update.effective_user.id}</code>", parse_mode=constants.ParseMode.HTML)
+
+
+async def cmd_gdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        await reply_denied(update.message, update.effective_user.id)
+        return
+    msg = update.message
+    if not context.args:
+        await msg.reply_text(
+            "🐞 <b>GDB Debugger</b> — run real GDB commands on the Cloud Server!\n\n"
+            "<b>Usage:</b> reply to a file (or add a URL at the end)\n"
+            "→ <code>/gdb info functions</code>\n"
+            "→ <code>/gdb disassemble main</code>\n"
+            "→ <code>/gdb info files;info functions</code>\n"
+            "→ <code>/gdb disassemble main https://site.com/app.bin</code>\n\n"
+            "Supports GDB batch commands: <code>info … disassemble … x/… p … bt …</code>",
+            parse_mode=constants.ParseMode.HTML,
+        )
+        return
+    script = " ".join(context.args[0:])
+    doc = getattr(msg, "document", None)
+    if doc is None and msg.reply_to_message is not None:
+        doc = msg.reply_to_message.document
+    url = ""
+    for a in context.args:
+        if a.startswith(("http://", "https://")):
+            url = a
+            script = script.replace(a, "").strip()
+            break
+    if doc is None and not url:
+        await msg.reply_text("❌ Reply to a file or add a URL: <code>/gdb disassemble main &lt;url&gt;</code>", parse_mode=constants.ParseMode.HTML)
+        return
+    is_admin = str(update.effective_user.id) in ADMIN_IDS
+    if doc is not None:
+        size_mb = (doc.file_size or 0) / (1024 * 1024)
+        if size_mb > MAX_FILE_MB:
+            await msg.reply_text(OVER_LIMIT_MSG.format(size=size_mb), parse_mode=constants.ParseMode.HTML)
+            return
+        status = await msg.reply_text("🐞 Running GDB… Connecting to Cloud Server.", parse_mode=constants.ParseMode.HTML)
+        try:
+            tg_file = await doc.get_file()
+            tg_file_path = tg_file.file_path
+            if not tg_file_path:
+                await status.edit_text("❌ Could not get file path from Telegram. Try URL mode.")
+                return
+            await send_to_job(msg, status, filename=doc.file_name, tg_file_path=tg_file_path, is_admin=is_admin, engine="gdb", file_id=doc.file_id, gdb_script=script)
+        except Exception as e:
+            await status.edit_text("❌ File processing failed: " + str(e))
+    else:
+        filename = url.split("?")[0].rstrip("/").rsplit("/", 1)[-1] or "download"
+        status = await msg.reply_text("🐞 Running GDB…")
+        await send_to_job(msg, status, file_url=url, filename=str(filename), is_admin=is_admin, engine="gdb", gdb_script=script)
 
 
 async def cancel_github_job(job_name: str):
@@ -594,7 +608,7 @@ def get_report_url() -> str:
     return (base + "/internal/count") if base else ""
 
 
-async def trigger_github(file_url: str, chat_id: int, message_id: int, filename: str, tg_file_path: str = "", is_admin: bool = False, event_type: str = GITHUB_EVENT, file_id: str = "", original_msg_id: int = 0, is_premium: bool = False):
+async def trigger_github(file_url: str, chat_id: int, message_id: int, filename: str, tg_file_path: str = "", is_admin: bool = False, event_type: str = GITHUB_EVENT, file_id: str = "", original_msg_id: int = 0, is_premium: bool = False, gdb_script: str = ""):
     if not GITHUB_TOKEN:
         return False, 0, "GITHUB_TOKEN env missing"
     client_payload = {
@@ -608,6 +622,8 @@ async def trigger_github(file_url: str, chat_id: int, message_id: int, filename:
         "file_id": file_id,
         "report_url": get_report_url(),
     }
+    if gdb_script:
+        client_payload["gdb_script"] = gdb_script
     if tg_file_path:
         client_payload["tg_file_path"] = tg_file_path
     else:
@@ -631,7 +647,7 @@ async def trigger_github(file_url: str, chat_id: int, message_id: int, filename:
     return resp.status_code in (204, 200), resp.status_code, resp.text[:300]
 
 
-async def send_to_job(msg, status, file_url: str = "", filename: str = "", tg_file_path: str = "", is_admin: bool = False, engine: str = "ghidra", file_id: str = "", is_premium: bool = False):
+async def send_to_job(msg, status, file_url: str = "", filename: str = "", tg_file_path: str = "", is_admin: bool = False, engine: str = "ghidra", file_id: str = "", is_premium: bool = False, gdb_script: str = ""):
     if status.message_id in CANCELLED_JOBS:
         CANCELLED_JOBS.remove(status.message_id)
         return
@@ -640,7 +656,7 @@ async def send_to_job(msg, status, file_url: str = "", filename: str = "", tg_fi
         await status.edit_text(
             "❌ GitHub trigger failed: <b>GITHUB_TOKEN env missing</b> on Railway.\n"
             "Set it in Railway Dashboard → Variables, then Redeploy.\n"
-            "Powered By @R3V_X",
+            "Powered By @Ghostofhackers",
             parse_mode=constants.ParseMode.HTML,
         )
         return
@@ -652,18 +668,20 @@ async def send_to_job(msg, status, file_url: str = "", filename: str = "", tg_fi
         event_type = "decompile-apktool"
     elif engine == "apktool-build":
         event_type = "compile-apktool"
+    elif engine == "gdb":
+        event_type = "decompile-job"
     else:
         event_type = "decompile-job"
         
     user_id = str(msg.from_user.id) if msg and msg.from_user else ""
-    ok, code, body = await trigger_github(file_url, msg.chat_id, status.message_id, filename, tg_file_path, is_admin, event_type, file_id, msg.message_id, is_premium)
+    ok, code, body = await trigger_github(file_url, msg.chat_id, status.message_id, filename, tg_file_path, is_admin, event_type, file_id, msg.message_id, is_premium, gdb_script)
     if not ok:
         await status.edit_text(
             "❌ GitHub trigger failed (HTTP <code>{code}</code>).\n"
             "Repo: <code>{repo}</code>\n"
             "Response: <code>{body}</code>\n\n"
             "Fix: Railway → Variables → check <code>GITHUB_TOKEN</code> (repo scope) "
-            "and <code>GITHUB_REPO</code> (should be <code>Saini920/Bottestgidra</code>), then Redeploy.".format(
+            "and <code>GITHUB_REPO</code> (should be <code>Toboisking/test-123</code>), then Redeploy.".format(
                 code=code, repo=GITHUB_REPO, body=body
             ),
             parse_mode=constants.ParseMode.HTML,
@@ -707,34 +725,15 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = str(update.effective_user.id)
-    is_premium = user_id in ADMIN_IDS or user_id in db.data["subscriptions"]
+    is_premium = True
     
     fname_l = (doc.file_name or "").lower()
     is_small_type = fname_l.endswith((".so", ".dex"))
-    if user_id in ADMIN_IDS:
-        user_max_mb = 2000
-    elif is_premium:
-        user_max_mb = 100 if is_small_type else 500
-    else:
-        user_max_mb = 30 if is_small_type else 200
+    user_max_mb = 100 if is_small_type else 500
 
     size_mb = (doc.file_size or 0) / (1024 * 1024)
     if size_mb > user_max_mb:
-        if not is_premium:
-            limit_msg = (
-                "⚠️ <b>File Size Limit Exceeded!</b>\n\n"
-                f"Free users can upload files up to <b>{user_max_mb} MB</b> (your file is <b>{size_mb:.1f} MB</b>).\n\n"
-                "⭐ Upgrade to <b>Premium (₹99)</b> to upload larger files!"
-            )
-            await msg.reply_text(
-                limit_msg,
-                parse_mode=constants.ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⭐ Upgrade to Premium (₹99)", callback_data="buy_sub")]
-                ])
-            )
-        else:
-            await msg.reply_text(OVER_LIMIT_MSG.format(size=size_mb), parse_mode=constants.ParseMode.HTML)
+        await msg.reply_text(OVER_LIMIT_MSG.format(size=size_mb), parse_mode=constants.ParseMode.HTML)
         return
 
     status = await msg.reply_text("🚀 File received! Sending to server...")
@@ -753,34 +752,27 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
         user_id = str(update.effective_user.id)
-        is_premium = user_id in ADMIN_IDS or user_id in db.data["subscriptions"]
+        is_premium = True
 
         import uuid
         job_id = str(uuid.uuid4())[:8]
         PENDING_JOBS[job_id] = {"msg": msg, "status": status, "filename": doc.file_name, "tg_file_path": tg_file_path, "file_url": "", "file_id": file_id}
         
         if doc.file_name and doc.file_name.lower().endswith(".smali"):
-            if is_premium:
-                btn_jadx = InlineKeyboardButton("☕ Smali → Java", callback_data=f"engine_jadx_{job_id}")
-            else:
-                btn_jadx = InlineKeyboardButton("☕ Smali → Java (Premium Only)", callback_data="buy_sub")
+            btn_jadx = InlineKeyboardButton("☕ Smali → Java", callback_data=f"engine_jadx_{job_id}")
             await status.edit_text(
                 "☕ <b>Smali File Detected!</b>\nConvert Smali to readable Java source?\n\n"
-                "• ☕ <b>Smali → Java (JADX):</b> Decompile Smali to Java (⭐ Premium)",
+                "• ☕ <b>Smali → Java (JADX):</b> Decompile Smali to Java",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([[btn_jadx]])
             )
         elif doc.file_name and doc.file_name.lower().endswith(".dex"):
-            if is_premium:
-                btn_jadx = InlineKeyboardButton("☕ Decompile (Java)", callback_data=f"engine_jadx_{job_id}")
-                btn_d2j = InlineKeyboardButton("🧬 Decompile + Java", callback_data=f"engine_dex2jar_{job_id}")
-            else:
-                btn_jadx = InlineKeyboardButton("☕ Decompile (Premium Only)", callback_data="buy_sub")
-                btn_d2j = InlineKeyboardButton("🧬 Decompile + Java (Premium Only)", callback_data="buy_sub")
+            btn_jadx = InlineKeyboardButton("☕ Decompile (Java)", callback_data=f"engine_jadx_{job_id}")
+            btn_d2j = InlineKeyboardButton("🧬 Decompile + Java", callback_data=f"engine_dex2jar_{job_id}")
             await status.edit_text(
                 "🧬 <b>DEX File Detected!</b>\nChoose how to process:\n\n"
-                "• ☕ <b>Decompile:</b> classes.dex → Java Source (JADX) (⭐ Premium)\n"
-                "• 🧬 <b>Decompile + Java:</b> classes.dex → JAR + Java Source (dex2jar + CFR) (⭐ Premium)",
+                "• ☕ <b>Decompile:</b> classes.dex → Java Source (JADX)\n"
+                "• 🧬 <b>Decompile + Java:</b> classes.dex → JAR + Java Source (dex2jar + CFR)",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [btn_jadx],
@@ -788,21 +780,16 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ])
             )
         elif doc.file_name and doc.file_name.lower().endswith(".apk"):
-            if is_premium:
-                btn_jadx = InlineKeyboardButton("☕ JADX (Java Source)", callback_data=f"engine_jadx_{job_id}")
-                btn_dex2jar = InlineKeyboardButton("🧬 dex2jar (JAR+Java)", callback_data=f"engine_dex2jar_{job_id}")
-                btn_apktool = InlineKeyboardButton("📱 Apktool (XML/Smali)", callback_data=f"engine_apktool_{job_id}")
-            else:
-                btn_jadx = InlineKeyboardButton("☕ JADX (Premium Only)", callback_data="buy_sub")
-                btn_dex2jar = InlineKeyboardButton("🧬 dex2jar (Premium Only)", callback_data="buy_sub")
-                btn_apktool = InlineKeyboardButton("🔒 Apktool (Premium Only)", callback_data="buy_sub")
+            btn_jadx = InlineKeyboardButton("☕ JADX (Java Source)", callback_data=f"engine_jadx_{job_id}")
+            btn_dex2jar = InlineKeyboardButton("🧬 dex2jar (JAR+Java)", callback_data=f"engine_dex2jar_{job_id}")
+            btn_apktool = InlineKeyboardButton("📱 Apktool (XML/Smali)", callback_data=f"engine_apktool_{job_id}")
 
             await status.edit_text(
                 "🤖 <b>APK Detected!</b>\nChoose your processing engine:\n\n"
-                "• ☕ <b>JADX:</b> APK → Java Source (⭐ Premium)\n"
-                "• 🧬 <b>dex2jar:</b> APK → JAR + Java Source (⭐ Premium)\n"
-                "• 📱 <b>Apktool:</b> Decompile APKs (⭐ Premium)\n"
-                "• ⚙️ <b>Ghidra:</b> Decompile binaries & ZIPs (Free)",
+                "• ☕ <b>JADX:</b> APK → Java Source\n"
+                "• 🧬 <b>dex2jar:</b> APK → JAR + Java Source\n"
+                "• 📱 <b>Apktool:</b> Decompile APKs\n"
+                "• ⚙️ <b>Ghidra:</b> Decompile binaries & ZIPs",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [btn_jadx, btn_dex2jar],
@@ -811,21 +798,16 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ])
             )
         elif doc.file_name and doc.file_name.lower().endswith(".zip"):
-            if is_premium:
-                btn_build = InlineKeyboardButton("🔨 Compile APK (Apktool Build)", callback_data=f"engine_apktool-build_{job_id}")
-                btn_jadx = InlineKeyboardButton("☕ JADX (Java/Smali)", callback_data=f"engine_jadx_{job_id}")
-                btn_d2j = InlineKeyboardButton("🧬 dex2jar (JAR+Java)", callback_data=f"engine_dex2jar_{job_id}")
-            else:
-                btn_build = InlineKeyboardButton("🔒 Compile APK (Premium Only)", callback_data="buy_sub")
-                btn_jadx = InlineKeyboardButton("☕ JADX (Premium Only)", callback_data="buy_sub")
-                btn_d2j = InlineKeyboardButton("🧬 dex2jar (Premium Only)", callback_data="buy_sub")
+            btn_build = InlineKeyboardButton("🔨 Compile APK (Apktool Build)", callback_data=f"engine_apktool-build_{job_id}")
+            btn_jadx = InlineKeyboardButton("☕ JADX (Java/Smali)", callback_data=f"engine_jadx_{job_id}")
+            btn_d2j = InlineKeyboardButton("🧬 dex2jar (JAR+Java)", callback_data=f"engine_dex2jar_{job_id}")
 
             await status.edit_text(
                 "🤖 <b>ZIP Archive Detected!</b>\nChoose processing engine:\n\n"
-                "• ⚙️ <b>Ghidra:</b> Decompile binaries inside ZIP (Free)\n"
-                "• ☕ <b>JADX:</b> Decompile Java/Smali to source (⭐ Premium)\n"
-                "• 🧬 <b>dex2jar:</b> DEX → JAR + Java Source (⭐ Premium)\n"
-                "• 🔨 <b>Compile APK:</b> Build APK from decompiled ZIP (⭐ Premium)",
+                "• ⚙️ <b>Ghidra:</b> Decompile binaries inside ZIP\n"
+                "• ☕ <b>JADX:</b> Decompile Java/Smali to source\n"
+                "• 🧬 <b>dex2jar:</b> DEX → JAR + Java Source\n"
+                "• 🔨 <b>Compile APK:</b> Build APK from decompiled ZIP",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("⚙️ Ghidra (Decompile binaries)", callback_data=f"engine_ghidra_{job_id}")],
@@ -850,36 +832,13 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid_str = str(user.id)
     sub = db.data["subscriptions"].get(uid_str)
 
-    if uid_str in ADMIN_IDS:
-        daily_max = "Unlimited (Admin)"
-        sub_info = "⭐ <b>Subscription Plan:</b> Unlimited Admin Access\n"
-    elif sub:
-        try:
-            exp_date = date.fromisoformat(sub["expires_at"])
-            days_left = max(0, (exp_date - today).days)
-            daily_max = sub.get("daily_limit", MAX_DAILY_FILES)
-            sub_info = (
-                f"⭐ <b>Subscription Plan:</b> Custom Plan\n"
-                f"📊 <b>Custom Daily Quota:</b> {daily_max} files/day\n"
-                f"📅 <b>Expiry Date:</b> <code>{sub.get('expires_at')}</code>\n"
-                f"⏳ <b>Days Remaining:</b> <b>{days_left} days</b>\n"
-            )
-        except Exception:
-            daily_max = MAX_DAILY_FILES
-            sub_info = f"⭐ <b>Subscription Plan:</b> Standard ({MAX_DAILY_FILES} files/day)\n"
-    else:
-        daily_max = MAX_DAILY_FILES
-        sub_info = f"⭐ <b>Subscription Plan:</b> Standard Approved Access\n"
+    daily_max = "Unlimited"
+    sub_info = "🎉 <b>Plan:</b> 100% Free — No Subscription Needed\n"
 
     used_today = record["count"] if ((record := db.data['daily_usage'].get(uid_str)) and record["date"] == today.isoformat()) else 0
-    if uid_str in ADMIN_IDS:
-        remaining = "Unlimited"
-        used_display = f"{used_today} / Unlimited"
-        upload_display = "Unlimited (Max Telegram API Limit)"
-    else:
-        remaining = f"{max(0, daily_max - used_today)} files"
-        used_display = f"{used_today} / {daily_max}"
-        upload_display = f"{MAX_FILE_MB} MB"
+    remaining = "Unlimited"
+    used_display = f"{used_today} / Unlimited"
+    upload_display = "100 MB (.so/.dex) | 500 MB (APK/ZIP)"
 
     now = time.time()
     active_now = len([t for t in active_jobs_timestamps if now - t < 600])
@@ -895,12 +854,12 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     profile_text = (
-        "👤 <b>USER PROFILE & SUBSCRIPTION DETAILS</b>\n"
+        "👤 <b>USER PROFILE</b>\n"
         "═══════════════════════════════════\n"
         f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
         f"👤 <b>Name:</b> {user.full_name}\n"
         f"🌐 <b>Username:</b> @{user.username if user.username else 'N/A'}\n"
-        f"✅ <b>Status:</b> Approved User\n"
+        f"✅ <b>Status:</b> Free User — Total Access\n"
         f"{sub_info}\n"
         "📊 <b>USAGE & LIMITS</b>\n"
         "───────────────────────\n"
@@ -909,13 +868,13 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ <b>Max Direct Upload:</b> {upload_display}\n"
         f"⚙️ <b>Server Active Jobs:</b> {active_now} / {MAX_CONCURRENT_JOBS}\n"
         f"⏳ <b>Queued Jobs:</b> {job_queue.qsize()}\n\n"
-        "⚡ <i>Powered By @R3V_X</i>"
+        "⚡ <i>Powered By @Ghostofhackers</i>"
     )
     await update.message.reply_text(
         profile_text,
         parse_mode=constants.ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⭐ Buy / Upgrade Subscription", callback_data="buy_sub")]
+            [InlineKeyboardButton("🎉 100% Free — No Subscription", callback_data="buy_sub")]
         ])
     )
 
@@ -1032,7 +991,7 @@ async def handle_admin_text_message(update: Update, context: ContextTypes.DEFAUL
                         f"📅 <b>Validity Duration:</b> <b>{days_val} Days</b>\n"
                         f"⏳ <b>Expires On:</b> <b>{exp_date}</b>\n\n"
                         "🚀 Enjoy full access to Ghidra Reverse Engineering Engine!\n"
-                        "👥 <b>Support Admins:</b> @R3V_X"
+                        "👥 <b>Support Admins:</b> @Ghostofhackers"
                     ),
                     parse_mode=constants.ParseMode.HTML,
                 )
@@ -1197,7 +1156,7 @@ async def cmd_setlimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"📅 <b>Validity Duration:</b> <b>{days_val} Days</b>\n"
                         f"⏳ <b>Expires On:</b> <b>{exp_date}</b>\n\n"
                         "🚀 Enjoy full access to Ghidra Reverse Engineering Engine!\n"
-                        "👥 <b>Support Admins:</b> @R3V_X"
+                        "👥 <b>Support Admins:</b> @Ghostofhackers"
                     ),
                     parse_mode=constants.ParseMode.HTML,
                 )
@@ -1239,7 +1198,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 <b>Total Files Processed Today:</b> {today_files}\n"
         f"⚙️ <b>Active Cloud Jobs:</b> {active_now} / {MAX_CONCURRENT_JOBS}\n"
         f"⏳ <b>Queued Jobs:</b> {job_queue.qsize()}\n\n"
-        "⚡ <i>Powered By @R3V_X</i>"
+        "⚡ <i>Powered By @Ghostofhackers</i>"
     )
     await update.message.reply_text(stats_text, parse_mode=constants.ParseMode.HTML)
 
@@ -1346,7 +1305,7 @@ async def subscription_checker_loop(app: Application):
                             "═══════════════════════════════════\n"
                             f"Your bot subscription will expire in <b>{days_left} days</b> (Expires: <code>{exp_date}</code>).\n\n"
                             "⚠️ Please contact an Admin to renew your subscription so you don't lose access!\n"
-                            "👥 <b>Admins:</b> @R3V_X"
+                            "👥 <b>Admins:</b> @Ghostofhackers"
                         )
                         try:
                             await app.bot.send_message(
@@ -1354,7 +1313,7 @@ async def subscription_checker_loop(app: Application):
                                 text=msg_text,
                                 parse_mode=constants.ParseMode.HTML,
                                 reply_markup=InlineKeyboardMarkup([
-                                    [InlineKeyboardButton("👤 Contact Admin to Renew", url="https://t.me/R3V_X")]
+                                    [InlineKeyboardButton("👤 Contact Admin to Renew", url="https://t.me/Ghostofhackers")]
                                 ])
                             )
                         except Exception as e:
@@ -1369,7 +1328,7 @@ async def subscription_checker_loop(app: Application):
                             "═══════════════════════════════════\n"
                             f"Your bot subscription will expire in <b>{max(1, days_left)} day</b> (Expires: <code>{exp_date}</code>).\n\n"
                             "⚠️ Contact Admin to renew immediately so you don't lose access!\n"
-                            "👥 <b>Admins:</b> @R3V_X"
+                            "👥 <b>Admins:</b> @Ghostofhackers"
                         )
                         try:
                             await app.bot.send_message(
@@ -1377,7 +1336,7 @@ async def subscription_checker_loop(app: Application):
                                 text=msg_text,
                                 parse_mode=constants.ParseMode.HTML,
                                 reply_markup=InlineKeyboardMarkup([
-                                    [InlineKeyboardButton("🔄 Renew Subscription", url="https://t.me/R3V_X")]
+                                    [InlineKeyboardButton("🔄 Renew Subscription", url="https://t.me/Ghostofhackers")]
                                 ])
                             )
                         except Exception as e:
@@ -1410,7 +1369,7 @@ async def weekly_analytics_loop(app: Application):
                 f"🚫 <b>Banned Users:</b> {len(db.data['banned'])}\n"
                 f"📅 <b>Today's Files Processed:</b> {today_files}\n"
                 "⚙️ <b>Server Health:</b> 100% Operational 🔥\n\n"
-                "⚡ <i>Powered By @R3V_X</i>"
+                "⚡ <i>Powered By @Ghostofhackers</i>"
             )
             for admin_id in ADMIN_IDS:
                 try:
@@ -1461,7 +1420,6 @@ async def cleanup_workflows_loop(app: Application):
 
 async def post_init(app: Application):
     asyncio.create_task(queue_worker_loop())
-    asyncio.create_task(subscription_checker_loop(app))
     asyncio.create_task(weekly_analytics_loop(app))
     asyncio.create_task(cleanup_workflows_loop(app))
 
@@ -1478,11 +1436,11 @@ def main():
     app.add_handler(CommandHandler("unapproved_users", cmd_list_users))
     app.add_handler(CommandHandler("ban_users", cmd_list_users))
     app.add_handler(CommandHandler("banned_users", cmd_list_users))
-    app.add_handler(CommandHandler("premium_users", cmd_list_users))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("myid", cmd_myid))
     app.add_handler(CommandHandler("profile", cmd_profile))
+    app.add_handler(CommandHandler("gdb", cmd_gdb))
     app.add_handler(CommandHandler("free", cmd_free))
     app.add_handler(CommandHandler("unfree", cmd_unfree))
     app.add_handler(CommandHandler("approve", cmd_approve))
@@ -1490,7 +1448,6 @@ def main():
     app.add_handler(CommandHandler("ban", cmd_ban))
     app.add_handler(CommandHandler("unban", cmd_unban))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
-    app.add_handler(CommandHandler("setlimit", cmd_setlimit))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("active", cmd_active))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text_message))
