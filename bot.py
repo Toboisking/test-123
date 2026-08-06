@@ -42,7 +42,7 @@ ADMIN_STATE = {}  # {user_id: state_str}
 ADMIN_TEMP_DATA = {}
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "Saini920/Bottestgidra")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "Toboisking/test-123")
 GITHUB_EVENT = os.environ.get("GITHUB_EVENT", "decompile-job")
 
 from database import RepoDB
