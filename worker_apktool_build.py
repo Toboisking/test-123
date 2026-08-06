@@ -28,6 +28,33 @@ MAX_DOWNLOAD_MB = 2000 if IS_ADMIN else 500
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+CANCEL_MARKER = "Job Cancelled by User"
+CANCELLED = {"v": False}
+
+
+class JobCancelled(BaseException):
+    pass
+
+
+async def cancel_watchdog():
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            while not CANCELLED["v"]:
+                await asyncio.sleep(2)
+                try:
+                    resp = await client.post(
+                        f"{API}/getMessage",
+                        data={"chat_id": CHAT_ID, "message_id": MESSAGE_ID},
+                    )
+                    txt = ((resp.json() or {}).get("result") or {}).get("text") or ""
+                except Exception:
+                    continue
+                if CANCEL_MARKER in txt:
+                    CANCELLED["v"] = True
+                    return
+    except Exception as e:
+        log.warning("Cancel watchdog stopped: %s", e)
+
 
 def check_download_size(total_bytes: int):
     if total_bytes and total_bytes > MAX_DOWNLOAD_MB * 1024 * 1024 and not IS_ADMIN:
@@ -60,6 +87,8 @@ def tg(method: str, **params):
 import json
 
 def edit(text: str, parse_mode: str = None, keep_button: bool = True):
+    if CANCELLED["v"]:
+        return
     params = {"chat_id": CHAT_ID, "message_id": MESSAGE_ID, "text": text}
     if parse_mode:
         params["parse_mode"] = parse_mode
@@ -124,6 +153,8 @@ async def download_url(url: str, dest: Path, on_progress) -> str:
                 downloaded = 0
                 with open(dest, "wb") as fh:
                     async for chunk in resp.aiter_bytes(65536):
+                        if CANCELLED["v"]:
+                            raise JobCancelled()
                         fh.write(chunk)
                         downloaded += len(chunk)
                         if total:
@@ -152,6 +183,7 @@ def send_document(file_path: Path, caption: str, filename: str):
 async def main():
     if not BOT_TOKEN or not CHAT_ID:
         sys.exit(1)
+    asyncio.create_task(cancel_watchdog())
 
     edit("🟢 Job started! Preparing Compiler on cloud server...", parse_mode="HTML")
     work_dir = Path(tempfile.gettempdir()) / ("apktool_build_" + os.urandom(8).hex())
@@ -181,6 +213,8 @@ async def main():
                             done = 0
                             with open(dest, "wb") as fh:
                                 async for chunk in resp.aiter_bytes(65536):
+                                    if CANCELLED["v"]:
+                                        raise JobCancelled()
                                     fh.write(chunk)
                                     done += len(chunk)
                                     if total:
@@ -201,6 +235,9 @@ async def main():
                 )
                 dl_logs = []
                 while True:
+                    if CANCELLED["v"]:
+                        proc.kill()
+                        raise JobCancelled()
                     raw = await proc.stdout.readline()
                     if not raw:
                         break
@@ -228,8 +265,8 @@ async def main():
         proj_dir = work_dir / "project"
         proj_dir.mkdir()
         try:
-            with zipfile.ZipFile(dest, "r") as zf:
-                zf.extractall(proj_dir)
+            from zip_utils import extract_archive
+            extract_archive(dest, proj_dir)
         except Exception as e:
             edit("❌ Extraction failed. Please send a valid ZIP containing an apktool project.")
             return
@@ -263,6 +300,9 @@ async def main():
         out_lines = []
         async def read_stream():
             while True:
+                if CANCELLED["v"]:
+                    proc.kill()
+                    raise JobCancelled()
                 raw = await proc.stdout.readline()
                 if not raw:
                     break
@@ -343,6 +383,9 @@ async def main():
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
                 )
                 while True:
+                    if CANCELLED["v"]:
+                        proc.kill()
+                        raise JobCancelled()
                     raw = await proc.stdout.readline()
                     if not raw:
                         break
@@ -369,6 +412,8 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
+    except JobCancelled:
+        pass
     except Exception as e:
         import traceback
         err_msg = f"❌ Fatal crash in worker_apktool_build:\\n<code>{traceback.format_exc()[-500:]}</code>"

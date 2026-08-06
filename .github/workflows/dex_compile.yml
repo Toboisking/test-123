@@ -1,16 +1,15 @@
-name: decompile-dex2jar
-run-name: dex2jar-${{ github.event.client_payload.chat_id }}-${{ github.event.client_payload.message_id }}
-# re-register: workflow was stuck in deleted state after history reset
+name: dex-compile
+run-name: dexcompile-${{ github.event.action == 'dex-compile-java' && 'java' || 'smali' }}-${{ github.event.client_payload.chat_id }}-${{ github.event.client_payload.message_id }}
 on:
   repository_dispatch:
-    types: [decompile-dex2jar]
+    types: [dex-compile-smali, dex-compile-java]
 
 permissions:
   actions: write
   contents: read
 
 jobs:
-  decompile:
+  compile:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
@@ -23,51 +22,33 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Cache dex2jar + CFR
-        id: dx-cache
+      - name: Cache smali
+        id: smali-cache
         uses: actions/cache@v4
         with:
-          path: |
-            /opt/dex2jar
-            /opt/cfr.jar
-          key: dex2jar-cfr-v2
+          path: /opt/smali.jar
+          key: smali-3.0.9
 
-      - name: Get dex2jar
-        if: steps.dx-cache.outputs.cache-hit != 'true'
+      - name: Get smali
+        if: steps.smali-cache.outputs.cache-hit != 'true'
         run: |
-          sudo rm -rf /opt/dex2jar
-          sudo mkdir -p /opt/dex2jar
-          curl -L -o /tmp/dex2jar.zip https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip
-          sudo unzip -q -o /tmp/dex2jar.zip -d /tmp/dx
-          libdir=$(sudo bash -c 'find /tmp/dx -maxdepth 3 -type d -name lib | head -n1')
-          echo "libdir: $libdir"
-          sudo cp -r "$libdir" /opt/dex2jar/lib
-          ls /opt/dex2jar/lib
-          test -f /opt/dex2jar/lib/dex-tools-v2.4.jar
-          echo "dex2jar ready"
+          sudo curl -L -o /opt/smali.jar https://github.com/baksmali/smali/releases/download/3.0.9/smali-3.0.9-fat.jar
+          test -f /opt/smali.jar
+          echo "smali ready"
 
-      - name: Get CFR
-        if: steps.dx-cache.outputs.cache-hit != 'true'
-        run: |
-          sudo curl -L -o /opt/cfr.jar https://github.com/leibnitz27/cfr/releases/download/0.152/cfr-0.152.jar
-          test -f /opt/cfr.jar
-          echo "CFR ready"
-
-      - name: Cache JADX (fallback)
-        id: jadx-cache
+      - name: Cache R8/D8
+        id: r8-cache
         uses: actions/cache@v4
         with:
-          path: /opt/jadx
-          key: jadx-1.5.6
+          path: /opt/r8.jar
+          key: r8-8.3.37
 
-      - name: Get JADX (fallback)
-        if: steps.jadx-cache.outputs.cache-hit != 'true'
+      - name: Get R8/D8
+        if: steps.r8-cache.outputs.cache-hit != 'true'
         run: |
-          sudo mkdir -p /opt/jadx
-          curl -L -o /tmp/jadx.zip https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip
-          sudo unzip -q -o /tmp/jadx.zip -d /opt/jadx
-          sudo chmod +x /opt/jadx/bin/jadx
-          echo "JADX ready"
+          sudo curl -L -o /opt/r8.jar https://storage.googleapis.com/r8-releases/raw/8.3.37/r8lib.jar
+          test -f /opt/r8.jar
+          echo "r8 ready"
 
       - name: Cache TG Session
         uses: actions/cache@v4
@@ -95,7 +76,7 @@ jobs:
               print("Restored sessions:", sorted(os.listdir("/opt/tg_sessions")))
           PYEOF
 
-      - name: Run dex2jar worker
+      - name: Run DEX Compile worker
         env:
           TELEGRAM_BOT_TOKEN: ${{ github.event.client_payload.bot_token || secrets.TELEGRAM_BOT_TOKEN }}
           PAYLOAD_FILE_URL: ${{ github.event.client_payload.file_url }}
@@ -109,11 +90,11 @@ jobs:
           PAYLOAD_IS_PREMIUM: ${{ github.event.client_payload.is_premium }}
           PAYLOAD_REPORT_URL: ${{ github.event.client_payload.report_url }}
           PAYLOAD_FILE_ID: ${{ github.event.client_payload.file_id }}
+          PAYLOAD_DEXCOMPILE_MODE: ${{ github.event.action == 'dex-compile-java' && 'java' || 'smali' }}
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
 
         run: |
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install -q httpx pyrogram tgcrypto
-          /tmp/venv/bin/python worker_dex2jar.py
-# re-register-2026-08-06
+          /tmp/venv/bin/python worker_dex_compile.py

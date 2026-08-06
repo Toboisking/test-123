@@ -1,20 +1,21 @@
 import asyncio
+import glob
 import logging
 import os
 import re
 import shutil
-import zipfile
 import sys
 import tempfile
 import time
+import zipfile
+from html import unescape
 from pathlib import Path
 from urllib.parse import unquote
-from html import unescape
 
 import httpx
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("worker_apktool")
+log = logging.getLogger("worker_smali")
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 FILE_URL = os.environ.get("PAYLOAD_FILE_URL", "")
@@ -28,7 +29,12 @@ IS_PREMIUM = os.environ.get("PAYLOAD_IS_PREMIUM", "False").lower() == "true"
 USER_ID = os.environ.get("PAYLOAD_USER_ID", CHAT_ID)
 REPORT_URL = os.environ.get("PAYLOAD_REPORT_URL", "")
 REPORT_TOKEN = BOT_TOKEN
+MODE = os.environ.get("PAYLOAD_SMALI_MODE", "full")
 MAX_DOWNLOAD_MB = 2000 if IS_ADMIN else 500
+
+BAKSMALI_JAR = "/opt/baksmali.jar"
+MAX_DEX_FREE = 3
+MAX_DEX_PREMIUM = 10
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -79,9 +85,6 @@ def notify_app(message: str, title: str = None):
         log.warning("Ntfy failed: %s", e)
 
 
-
-
-
 def tg(method: str, **params):
     try:
         resp = httpx.post(f"{API}/{method}", data=params, timeout=60)
@@ -123,6 +126,38 @@ def proc_cpu_usage(pid: int) -> int:
         return -1
 
 
+async def send_error_log(work_dir, exception_obj, title="Smali Decode failed"):
+    import traceback
+    err_str = traceback.format_exc()
+    log.error("%s: %s", title, exception_obj)
+    sent = False
+    try:
+        err_file = Path(work_dir) / "error.txt"
+        err_file.write_text(f"❌ {title}:\n\n{err_str}")
+        caption = f"❌ Error Log:\n{str(exception_obj)[:100]}"
+        try:
+            with open(err_file, "rb") as ef:
+                url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+                async with httpx.AsyncClient(timeout=120) as client:
+                    resp = await client.post(url, data={"chat_id": CHAT_ID, "caption": caption}, files={"document": ef})
+                    resp.raise_for_status()
+            sent = True
+        except Exception as e:
+            log.warning("HTTP error log upload failed, falling back to MTProto: %s", e)
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "upload_file.py", str(err_file), caption,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+            )
+            await proc.wait()
+            sent = (proc.returncode == 0)
+    except Exception as e:
+        log.error("Failed to upload error log: %s", e)
+    if sent:
+        edit(f"❌ {title}. Error log sent.", keep_button=False)
+    else:
+        edit(f"❌ {title}. Could not send error log. Try again later.", keep_button=False)
+
+
 async def download_url(url: str, dest: Path, on_progress) -> str:
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     fid = None
@@ -146,8 +181,7 @@ async def download_url(url: str, dest: Path, on_progress) -> str:
                     if fid:
                         m = re.search(r'name="confirm"\s+value="([^"]+)"', html)
                         if m:
-                            url = (f"https://drive.usercontent.google.com/download"
-                                   f"?id={fid}&export=download&confirm={m.group(1)}")
+                            url = f"https://drive.usercontent.google.com/download?id={fid}&export=download&confirm={m.group(1)}"
                             continue
                         if "Google Drive" in html or "drive.google" in html:
                             raise ValueError("Google Drive file not accessible.")
@@ -157,7 +191,7 @@ async def download_url(url: str, dest: Path, on_progress) -> str:
                         continue
                     raise ValueError("The link is a webpage, not a direct file.")
 
-                filename = "download.apk"
+                filename = "download.dex"
                 cd = resp.headers.get("content-disposition", "")
                 m = re.search(r'filename="?([^";]+)"?', cd)
                 if m:
@@ -183,20 +217,40 @@ async def download_url(url: str, dest: Path, on_progress) -> str:
         raise ValueError("Could not download file from this link.")
 
 
-async def run_apktool(file_path: Path, work_dir: Path, on_progress) -> Path:
-    out_dir = work_dir / "decompiled_apk"
+def collect_dex_inputs(file_path: Path, work_dir: Path) -> list:
+    ext = Path(FILENAME).suffix.lower()
+    if ext == ".dex":
+        return [str(file_path)]
+    if ext == ".zip":
+        extract_dir = work_dir / "dex_input"
+        extract_dir.mkdir(exist_ok=True)
+        from zip_utils import extract_archive
+        extract_archive(file_path, extract_dir)
+        dex_entries = [p for p in extract_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".dex"]
+        if not dex_entries:
+            raise ValueError("No .dex files found in the ZIP archive.")
+        max_dex = MAX_DEX_PREMIUM if IS_PREMIUM else MAX_DEX_FREE
+        if not IS_ADMIN and len(dex_entries) > max_dex:
+            raise ValueError(f"ZIP contains {len(dex_entries)} .dex files — max {max_dex} allowed for {'Premium' if IS_PREMIUM else 'Free'} users.")
+        return [str(p) for p in sorted(dex_entries)]
+    raise ValueError("Unsupported file type. Send a .dex file or a ZIP containing .dex files.")
+
+
+async def run_baksmali(dex_path: str, out_dir: Path, on_progress, progress_start: int, progress_end: int, idx: int, total: int) -> None:
     cmd = [
-        "java", "-Xmx8G", "-jar", "/opt/apktool/apktool.jar", "d", str(file_path),
-        "-o", str(out_dir), "-f"
+        "java", "-Xmx8G",
+        "-jar", BAKSMALI_JAR,
+        "disassemble", dex_path,
+        "-o", str(out_dir),
     ]
-    log.info("Running: %s", " ".join(cmd))
+    log.info("Running baksmali: %s", " ".join(cmd))
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
     )
-    
-    await on_progress(10, "📱 Decompiling APK with Apktool...")
-    
+
+    out_lines = []
     async def read_stream():
+        count = 0
         last_activity = time.monotonic()
         last_cpu = proc_cpu_usage(proc.pid)
         while True:
@@ -213,39 +267,33 @@ async def run_apktool(file_path: Path, work_dir: Path, on_progress) -> Path:
                     last_activity = time.monotonic()
                 elif time.monotonic() - last_activity >= 1800:
                     proc.kill()
-                    raise RuntimeError("Apktool stalled: no CPU activity for 30 minutes")
+                    raise RuntimeError("baksmali stalled: no CPU activity for 30 minutes")
                 continue
             if not raw:
                 break
             line = raw.decode(errors="replace").strip()
-            low = line.lower()
-            if "baksmali" in low or "smali" in low:
-                await on_progress(40, "🧩 Decompiling Smali Code...")
-            elif "resources" in low or "xml" in low:
-                await on_progress(70, "🖼️ Decoding Resources and XML...")
+            if line:
+                out_lines.append(line)
+                if len(out_lines) > 100:
+                    del out_lines[:-100]
+                if "Writing" in line or "smali" in line.lower():
+                    count += 1
+                    if count % 20 == 0:
+                        pct = progress_start + int((progress_end - progress_start) * 0.5)
+                        await on_progress(pct, f"🧩 Decoding .dex to Smali... ({idx}/{total})")
         return await proc.wait()
 
     try:
-        rc = await asyncio.wait_for(read_stream(), timeout=1800)
+        rc = await asyncio.wait_for(read_stream(), timeout=3600)
     except asyncio.TimeoutError:
         proc.kill()
-        raise TimeoutError("Apktool analysis timed out")
-    
-    if rc != 0 or not out_dir.exists():
-        raise Exception(f"Apktool failed with return code {rc}")
-    
-    return out_dir
+        raise TimeoutError("baksmali decode timed out")
 
+    if rc != 0:
+        raise RuntimeError(f"baksmali failed with exit code {rc}:\n" + "\n".join(out_lines[-20:]))
 
-def send_document(file_path: Path, caption: str, filename: str):
-    with open(file_path, "rb") as fh:
-        resp = httpx.post(
-            f"{API}/sendDocument",
-            data={"chat_id": CHAT_ID, "caption": caption[:1024], "parse_mode": "HTML"},
-            files={"document": (filename, fh, "application/zip")},
-            timeout=180,
-        )
-    return resp.json()
+    if not out_dir.exists() or not any(out_dir.rglob("*.smali")):
+        raise ValueError(f"No Smali output generated for {Path(dex_path).name}.")
 
 
 def check_zip_limits(file_path: Path):
@@ -253,7 +301,6 @@ def check_zip_limits(file_path: Path):
         return
     if Path(FILENAME).suffix.lower() != ".zip":
         return
-    import zipfile
     with zipfile.ZipFile(file_path) as zf:
         names = zf.namelist()
     so_dex = sum(1 for n in names if n.lower().endswith((".so", ".dex")))
@@ -264,12 +311,8 @@ def check_zip_limits(file_path: Path):
         raise ValueError(f"ZIP contains {so_dex} .so/.dex files — max {max_so_dex} allowed for {'Premium' if IS_PREMIUM else 'Free'} users.")
     if apks > max_apk:
         raise ValueError(f"ZIP contains {apks} .apk files — max {max_apk} allowed for {'Premium' if IS_PREMIUM else 'Free'} users.")
-
-
-def count_zip_so_dex(file_path: Path) -> int:
     if Path(FILENAME).suffix.lower() != ".zip":
         return 0
-    import zipfile
     with zipfile.ZipFile(file_path) as zf:
         names = zf.namelist()
     return sum(1 for n in names if n.lower().endswith((".so", ".dex")))
@@ -290,21 +333,57 @@ def report_extra_count(extra: int):
         log.warning("Count report failed: %s", e)
 
 
+def collect_com_folders(smali_dirs: list, work_dir: Path) -> Path:
+    com_root = work_dir / "com_extract"
+    com_root.mkdir(exist_ok=True)
+    found = False
+    for d in smali_dirs:
+        for pkg in sorted(Path(d).iterdir()):
+            if pkg.is_dir() and (pkg.name == "com" or pkg.name in ("android", "org", "kotlin", "kotlinx", "java", "javax")):
+                dst = com_root / pkg.name
+                dst.mkdir(parents=True, exist_ok=True)
+                for item in pkg.iterdir():
+                    if item.is_dir():
+                        shutil.copytree(item, dst / item.name, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(item, dst / item.name)
+                found = True
+    if not found:
+        for d in smali_dirs:
+            for pkg in sorted(Path(d).iterdir()):
+                if pkg.is_dir():
+                    dst = com_root / pkg.name
+                    dst.mkdir(parents=True, exist_ok=True)
+                    for item in pkg.iterdir():
+                        if item.is_dir():
+                            shutil.copytree(item, dst / item.name, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(item, dst / item.name)
+                    found = True
+                    break
+            if found:
+                break
+    if not found:
+        raise ValueError("No package folders found in the decoded Smali output.")
+    return com_root
+
+
 async def main():
     if not BOT_TOKEN or not CHAT_ID:
         log.error("Missing env TELEGRAM_BOT_TOKEN / PAYLOAD_CHAT_ID")
         sys.exit(1)
     asyncio.create_task(cancel_watchdog())
 
-    edit("🟢 Job started! Preparing Apktool on cloud server...", parse_mode="HTML")
+    edit("🟢 Job started! Preparing Smali Decode engine on cloud server...", parse_mode="HTML")
 
-    work_dir = Path(tempfile.gettempdir()) / ("apktool_" + os.urandom(8).hex())
+    work_dir = Path(tempfile.gettempdir()) / ("smali_" + os.urandom(8).hex())
     try:
         work_dir.mkdir(parents=True)
-        dest = work_dir / "input.apk"
+        ext = Path(FILENAME).suffix or ".dex"
+        dest = work_dir / f"input_file{ext}"
         last = [-100.0]
 
-        dl_method = ["📥 Downloading APK..."]
+        dl_method = ["📥 Downloading file..."]
         async def on_dl(pct: float):
             if pct < last[0] or (pct - last[0] < 2.0 and pct < 100.0): return
             last[0] = pct
@@ -315,7 +394,7 @@ async def main():
             got_file = False
             if TG_FILE_PATH:
                 try:
-                    filename = FILENAME or "download.apk"
+                    filename = FILENAME or "download.dex"
                     tg_url = TG_FILE_PATH if TG_FILE_PATH.startswith("http") else f"{API}/file/{TG_FILE_PATH}"
                     async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(120, read=300)) as client:
                         async with client.stream("GET", tg_url) as resp:
@@ -338,8 +417,8 @@ async def main():
                         raise
                     log.warning("HTTP download failed, falling back to MTProto: %s", http_err)
             if not got_file and file_id:
-                filename = FILENAME or "download.apk"
-                dl_method[0] = "📥 Downloading APK via MTProto (Pyrogram)..."
+                filename = FILENAME or "download.dex"
+                dl_method[0] = "📥 Downloading via MTProto (Pyrogram)..."
                 await on_dl(0.0)
                 proc = await asyncio.create_subprocess_exec(
                     sys.executable, "download_file.py", str(dest),
@@ -368,9 +447,9 @@ async def main():
                     raise ValueError(f"MTProto Download failed with code {proc.returncode}: {err_tail}")
                 got_file = True
             if not got_file:
-                filename_dl = await asyncio.wait_for(download_url(FILE_URL, dest, on_dl), timeout=1800)
+                filename = await asyncio.wait_for(download_url(FILE_URL, dest, on_dl), timeout=1800)
         except Exception as e:
-            edit("❌ Download failed: " + str(e)[:300])
+            await send_error_log(work_dir, e, "Download failed")
             return
 
         size = dest.stat().st_size
@@ -395,48 +474,85 @@ async def main():
             edit(f"❌ {e}", keep_button=False)
             return
 
-        edit(f"📥 Downloaded {size/1024/1024:.1f} MB! Starting Apktool analysis...")
+        edit(f"📥 Downloaded {size/1024/1024:.1f} MB! Starting Smali Decode...")
 
         last_prog = [0, ""]
-        async def on_progress(pct: int, label: str = "🧠 Analyzing..."):
+        async def on_progress(pct: int, label: str = "🧩 Decoding to Smali..."):
             if pct - last_prog[0] < 5 and label == last_prog[1]:
                 return
             last_prog[0], last_prog[1] = pct, label
             edit(f"{label}\n{progress_bar(pct)}")
 
         try:
-            out_dir = await run_apktool(dest, work_dir, on_progress)
-            bname = Path(FILENAME).stem or "decompiled_apk"
-        except TimeoutError:
-            edit("⏰ Timeout! The APK is too big.", keep_button=False)
+            dex_inputs = collect_dex_inputs(dest, work_dir)
+        except ValueError as e:
+            edit(f"❌ {e}", keep_button=False)
+            return
+
+        smali_dirs = []
+        total_dex = len(dex_inputs)
+        try:
+            for i, dex_path in enumerate(dex_inputs, start=1):
+                out_dir = work_dir / f"smali_{i}"
+                start_pct = 10 + int(70 * (i - 1) / total_dex)
+                end_pct = 10 + int(70 * i / total_dex)
+                await on_progress(start_pct, f"🧩 Decoding .dex to Smali... ({i}/{total_dex})")
+                await run_baksmali(dex_path, out_dir, on_progress, start_pct, end_pct, i, total_dex)
+                smali_dirs.append(out_dir)
+        except asyncio.TimeoutError:
+            edit("⏰ Timeout! The .dex file is too big.", keep_button=False)
+            return
+        except ValueError as e:
+            edit(f"❌ {e}", keep_button=False)
             return
         except Exception as e:
-            log.exception("Apktool crashed")
-            edit("❌ Apktool failed: " + str(e)[:300], keep_button=False)
+            await send_error_log(work_dir, e, "Smali Decode crashed")
             return
 
-        edit("📦 Packaging results...")
-        safe_name = re.sub(r'[^A-Za-z0-9._-]+', "_", FILENAME)[:60] or "file"
-        orig_stem = Path(safe_name).stem or "decompiled"
+        if MODE == "extract":
+            src_dir = await asyncio.to_thread(collect_com_folders, smali_dirs, work_dir)
+            await on_progress(88, "📦 Extracting main package folders (com/)...")
+        else:
+            src_dir = work_dir / "smali_combined"
+            src_dir.mkdir(exist_ok=True)
+            for i, d in enumerate(smali_dirs, start=1):
+                if total_dex == 1:
+                    for item in Path(d).iterdir():
+                        dst = src_dir / item.name
+                        if item.is_dir():
+                            shutil.copytree(item, dst, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(item, dst)
+                else:
+                    shutil.copytree(d, src_dir / f"dex_{i}")
 
-        zip_path = work_dir / f"{orig_stem}_apktool.zip"
+        await on_progress(100, "✅ Smali Decode complete!")
+        edit("📦 Packaging Smali Code...")
+        safe_name = re.sub(r'[^A-Za-z0-9._-]+', "_", filename)[:60] or "file"
+        orig_stem = Path(safe_name).stem or "smali"
+        suffix = "_com" if MODE == "extract" else ""
+        zip_path = work_dir / f"{orig_stem}_smali{suffix}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, dirs, files in os.walk(out_dir):
+            for root, dirs, files in os.walk(src_dir):
                 for f in files:
-                    file_path = os.path.join(root, f)
-                    arcname = os.path.relpath(file_path, out_dir)
-                    zf.write(file_path, arcname)
+                    fp = os.path.join(root, f)
+                    arcname = os.path.relpath(fp, src_dir)
+                    zf.write(fp, arcname)
 
-        edit("✅ Decompilation complete! Sending ZIP...")
-        
-        edit("✅ Decompilation complete! Sending ZIP...")
-        
-        caption = f"✅ Decompiled <b>{safe_name}</b> with Apktool — Powered By @Ghostofhackers"
+        if MODE == "extract":
+            edit("✅ Smali Decode complete (com/ extracted)! Sending ZIP...")
+        else:
+            edit("✅ Smali Decode complete! Sending ZIP...")
+
+        if MODE == "extract":
+            caption = f"✅ Decoded <b>{safe_name}</b> → Smali (com/ folder extracted) — Powered By @Ghostofhackers"
+        else:
+            caption = f"✅ Decoded <b>{safe_name}</b> to Smali Code — Powered By @Ghostofhackers"
         up_last = [0]
         async def on_up(pct: int):
             if pct < up_last[0] or pct - up_last[0] < 2: return
             up_last[0] = pct
-            edit(f"✅ Decompilation complete!\n📤 Sending ZIP...\n\n{progress_bar(pct)}")
+            edit(f"✅ Decode complete!\n📤 Sending ZIP...\n\n{progress_bar(pct)}")
 
         try:
             http_ok = False
@@ -477,15 +593,15 @@ async def main():
                 await proc.wait()
                 if proc.returncode != 0:
                     raise ValueError(f"MTProto Upload failed with code {proc.returncode}")
-            edit("✅ Decompilation complete! ZIP file delivered. 🔥", keep_button=False)
-            
+            edit("✅ Smali Decode complete! ZIP file delivered. 🔥", keep_button=False)
+
             if JOB_ID:
                 notify_app("FINAL_ZIP_URL:telegram_direct_upload")
         except Exception as e:
-            edit(f"❌ Result ZIP ready, but upload failed: {e}", keep_button=False)
-
+            await send_error_log(work_dir, e, "Result upload failed")
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     try:

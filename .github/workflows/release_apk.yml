@@ -1,4 +1,4 @@
-name: Build & Direct GitHub Release APK
+name: Build & Direct GitHub Release APK v2
 
 on:
   push:
@@ -42,3 +42,6 @@ jobs:
           files: app/build/outputs/apk/debug/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+# re-register-2026-08-06
+# re-register-2026-08-06
+# re-register-2026-08-06-v2

@@ -6,6 +6,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import zipfile
 from html import unescape
 from pathlib import Path
@@ -46,6 +47,33 @@ log.info("DEX2JAR_CP=%s", DEX2JAR_CP)
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+CANCEL_MARKER = "Job Cancelled by User"
+CANCELLED = {"v": False}
+
+
+class JobCancelled(BaseException):
+    pass
+
+
+async def cancel_watchdog():
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            while not CANCELLED["v"]:
+                await asyncio.sleep(2)
+                try:
+                    resp = await client.post(
+                        f"{API}/getMessage",
+                        data={"chat_id": CHAT_ID, "message_id": MESSAGE_ID},
+                    )
+                    txt = ((resp.json() or {}).get("result") or {}).get("text") or ""
+                except Exception:
+                    continue
+                if CANCEL_MARKER in txt:
+                    CANCELLED["v"] = True
+                    return
+    except Exception as e:
+        log.warning("Cancel watchdog stopped: %s", e)
+
 
 def check_download_size(total_bytes: int):
     if total_bytes and total_bytes > MAX_DOWNLOAD_MB * 1024 * 1024 and not IS_ADMIN:
@@ -78,6 +106,8 @@ def tg(method: str, **params):
 import json
 
 def edit(text: str, parse_mode: str = None, keep_button: bool = True):
+    if CANCELLED["v"]:
+        return
     params = {"chat_id": CHAT_ID, "message_id": MESSAGE_ID, "text": text}
     if parse_mode:
         params["parse_mode"] = parse_mode
@@ -94,6 +124,15 @@ def progress_bar(pct: float) -> str:
     filled = max(0, min(16, int(val * 16 / 100)))
     bar = "▰" * filled + "▱" * (16 - filled)
     return f"{bar} {val:.2f} %"
+
+
+def proc_cpu_usage(pid: int) -> int:
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            parts = f.read().split()
+        return int(parts[13]) + int(parts[14])
+    except Exception:
+        return -1
 
 
 async def send_error_log(work_dir, exception_obj, title="dex2jar Decompilation failed"):
@@ -176,6 +215,8 @@ async def download_url(url: str, dest: Path, on_progress) -> str:
                 downloaded = 0
                 with open(dest, "wb") as fh:
                     async for chunk in resp.aiter_bytes(65536):
+                        if CANCELLED["v"]:
+                            raise JobCancelled()
                         fh.write(chunk)
                         downloaded += len(chunk)
                         if total:
@@ -190,21 +231,17 @@ async def run_dex2jar(file_path: Path, work_dir: Path, on_progress) -> Path:
 
     inputs = [str(file_path)]
     if file_path.suffix.lower() == ".zip":
-        with zipfile.ZipFile(file_path, "r") as zf:
-            names = zf.namelist()
-            dex_entries = [n for n in names if n.lower().endswith(".dex")]
-            if dex_entries:
-                extract_dir = work_dir / "dex_input"
-                extract_dir.mkdir(exist_ok=True)
-                for de in dex_entries:
-                    zf.extract(de, extract_dir)
-                inputs = [str(p) for p in sorted(extract_dir.rglob("*.dex"))]
-            elif any(n.lower().endswith(".apk") for n in names):
-                apk_files = [n for n in names if n.lower().endswith(".apk")]
-                extract_dir = work_dir / "apk_input"
-                extract_dir.mkdir(exist_ok=True)
-                zf.extract(apk_files[0], extract_dir)
-                inputs = [str(extract_dir / apk_files[0])]
+        extract_dir = work_dir / "zip_input"
+        extract_dir.mkdir(exist_ok=True)
+        from zip_utils import extract_archive
+        extract_archive(file_path, extract_dir)
+        dex_entries = [p for p in extract_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".dex"]
+        if dex_entries:
+            inputs = [str(p) for p in sorted(dex_entries)]
+        else:
+            apk_files = [p for p in extract_dir.rglob("*") if p.is_file() and p.suffix.lower() == ".apk"]
+            if apk_files:
+                inputs = [str(apk_files[0])]
 
     if not inputs:
         raise ValueError("No DEX files found in the input.")
@@ -225,6 +262,9 @@ async def run_dex2jar(file_path: Path, work_dir: Path, on_progress) -> Path:
     out_lines = []
     async def read_stream():
         while True:
+            if CANCELLED["v"]:
+                proc.kill()
+                raise JobCancelled()
             raw = await proc.stdout.readline()
             if not raw:
                 break
@@ -266,16 +306,23 @@ async def run_cfr(jar_path: Path, work_dir: Path, on_progress) -> Path:
     out_lines = []
     async def read_stream():
         count = 0
-        idle = 0
+        last_activity = time.monotonic()
+        last_cpu = proc_cpu_usage(proc.pid)
         while True:
+            if CANCELLED["v"]:
+                proc.kill()
+                raise JobCancelled()
             try:
                 raw = await asyncio.wait_for(proc.stdout.readline(), timeout=60)
-                idle = 0
+                last_activity = time.monotonic()
             except asyncio.TimeoutError:
-                idle += 60
-                if idle >= 1800:
+                cpu = proc_cpu_usage(proc.pid)
+                if cpu > last_cpu:
+                    last_cpu = cpu
+                    last_activity = time.monotonic()
+                elif time.monotonic() - last_activity >= 1800:
                     proc.kill()
-                    raise RuntimeError("CFR stalled: no output for 30 minutes")
+                    raise RuntimeError("CFR stalled: no CPU activity for 30 minutes")
                 continue
             if not raw:
                 break
@@ -324,16 +371,23 @@ async def run_jadx_fallback(jar_path: Path, work_dir: Path, on_progress) -> Path
     out_lines = []
     async def read_stream():
         count = 0
-        idle = 0
+        last_activity = time.monotonic()
+        last_cpu = proc_cpu_usage(proc.pid)
         while True:
+            if CANCELLED["v"]:
+                proc.kill()
+                raise JobCancelled()
             try:
                 raw = await asyncio.wait_for(proc.stdout.readline(), timeout=60)
-                idle = 0
+                last_activity = time.monotonic()
             except asyncio.TimeoutError:
-                idle += 60
-                if idle >= 1800:
+                cpu = proc_cpu_usage(proc.pid)
+                if cpu > last_cpu:
+                    last_cpu = cpu
+                    last_activity = time.monotonic()
+                elif time.monotonic() - last_activity >= 1800:
                     proc.kill()
-                    raise RuntimeError("JADX fallback stalled: no output for 30 minutes")
+                    raise RuntimeError("JADX fallback stalled: no CPU activity for 30 minutes")
                 continue
             if not raw:
                 break
@@ -367,6 +421,8 @@ async def run_jadx_fallback(jar_path: Path, work_dir: Path, on_progress) -> Path
 
 
 def check_zip_limits(file_path: Path):
+    if IS_ADMIN:
+        return
     if Path(FILENAME).suffix.lower() != ".zip":
         return
     import zipfile
@@ -375,11 +431,32 @@ def check_zip_limits(file_path: Path):
     so_dex = sum(1 for n in names if n.lower().endswith((".so", ".dex")))
     apks = sum(1 for n in names if n.lower().endswith(".apk"))
     max_so_dex = 5 if IS_PREMIUM else 1
-    max_apk = 2 if IS_PREMIUM else 0
+    max_apk = 2 if IS_PREMIUM else 1
     if so_dex > max_so_dex:
         raise ValueError(f"ZIP contains {so_dex} .so/.dex files — max {max_so_dex} allowed for {'Premium' if IS_PREMIUM else 'Free'} users.")
     if apks > max_apk:
         raise ValueError(f"ZIP contains {apks} .apk files — max {max_apk} allowed for {'Premium' if IS_PREMIUM else 'Free'} users.")
+
+
+def check_jd_apk_limits(file_path: Path):
+    if IS_ADMIN:
+        return
+    jd_limit_mb = 100 if IS_PREMIUM else 30
+    limit = jd_limit_mb * 1024 * 1024
+    ext = Path(FILENAME).suffix.lower()
+    if ext == ".apk":
+        if file_path.stat().st_size > limit:
+            raise ValueError(
+                f"APK is {file_path.stat().st_size/1024/1024:.1f} MB — dex2jar is limited to {jd_limit_mb} MB for {'Premium' if IS_PREMIUM else 'Free'} users."
+            )
+    elif ext == ".zip":
+        import zipfile
+        with zipfile.ZipFile(file_path) as zf:
+            for info in zf.infolist():
+                if info.filename.lower().endswith(".apk") and info.file_size > limit:
+                    raise ValueError(
+                        f"ZIP contains an APK of {info.file_size/1024/1024:.1f} MB — dex2jar is limited to {jd_limit_mb} MB for {'Premium' if IS_PREMIUM else 'Free'} users."
+                    )
 
 
 def count_zip_so_dex(file_path: Path) -> int:
@@ -410,6 +487,7 @@ async def main():
     if not BOT_TOKEN or not CHAT_ID:
         log.error("Missing env TELEGRAM_BOT_TOKEN / PAYLOAD_CHAT_ID")
         sys.exit(1)
+    asyncio.create_task(cancel_watchdog())
 
     edit("🟢 Job started! Preparing dex2jar engine on cloud server...", parse_mode="HTML")
 
@@ -441,6 +519,8 @@ async def main():
                             done = 0
                             with open(dest, "wb") as fh:
                                 async for chunk in resp.aiter_bytes(65536):
+                                    if CANCELLED["v"]:
+                                        raise JobCancelled()
                                     fh.write(chunk)
                                     done += len(chunk)
                                     if total:
@@ -461,6 +541,9 @@ async def main():
                 )
                 dl_logs = []
                 while True:
+                    if CANCELLED["v"]:
+                        proc.kill()
+                        raise JobCancelled()
                     raw = await proc.stdout.readline()
                     if not raw:
                         break
@@ -502,6 +585,12 @@ async def main():
 
         try:
             check_zip_limits(dest)
+        except ValueError as e:
+            edit(f"❌ {e}", keep_button=False)
+            return
+
+        try:
+            check_jd_apk_limits(dest)
         except ValueError as e:
             edit(f"❌ {e}", keep_button=False)
             return
@@ -605,6 +694,9 @@ async def main():
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
                 )
                 while True:
+                    if CANCELLED["v"]:
+                        proc.kill()
+                        raise JobCancelled()
                     raw = await proc.stdout.readline()
                     if not raw:
                         break
@@ -629,4 +721,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except JobCancelled:
+        pass

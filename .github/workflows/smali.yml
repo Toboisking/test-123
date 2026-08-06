@@ -1,9 +1,9 @@
-name: decompile-dex2jar
-run-name: dex2jar-${{ github.event.client_payload.chat_id }}-${{ github.event.client_payload.message_id }}
+name: decompile-smali
+run-name: smali-${{ github.event.client_payload.chat_id }}-${{ github.event.client_payload.message_id }}
 # re-register: workflow was stuck in deleted state after history reset
 on:
   repository_dispatch:
-    types: [decompile-dex2jar]
+    types: [decompile-smali, decompile-smali-extract]
 
 permissions:
   actions: write
@@ -23,51 +23,19 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Cache dex2jar + CFR
-        id: dx-cache
+      - name: Cache baksmali
+        id: baksmali-cache
         uses: actions/cache@v4
         with:
-          path: |
-            /opt/dex2jar
-            /opt/cfr.jar
-          key: dex2jar-cfr-v2
+          path: /opt/baksmali.jar
+          key: baksmali-3.0.9
 
-      - name: Get dex2jar
-        if: steps.dx-cache.outputs.cache-hit != 'true'
+      - name: Get baksmali
+        if: steps.baksmali-cache.outputs.cache-hit != 'true'
         run: |
-          sudo rm -rf /opt/dex2jar
-          sudo mkdir -p /opt/dex2jar
-          curl -L -o /tmp/dex2jar.zip https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip
-          sudo unzip -q -o /tmp/dex2jar.zip -d /tmp/dx
-          libdir=$(sudo bash -c 'find /tmp/dx -maxdepth 3 -type d -name lib | head -n1')
-          echo "libdir: $libdir"
-          sudo cp -r "$libdir" /opt/dex2jar/lib
-          ls /opt/dex2jar/lib
-          test -f /opt/dex2jar/lib/dex-tools-v2.4.jar
-          echo "dex2jar ready"
-
-      - name: Get CFR
-        if: steps.dx-cache.outputs.cache-hit != 'true'
-        run: |
-          sudo curl -L -o /opt/cfr.jar https://github.com/leibnitz27/cfr/releases/download/0.152/cfr-0.152.jar
-          test -f /opt/cfr.jar
-          echo "CFR ready"
-
-      - name: Cache JADX (fallback)
-        id: jadx-cache
-        uses: actions/cache@v4
-        with:
-          path: /opt/jadx
-          key: jadx-1.5.6
-
-      - name: Get JADX (fallback)
-        if: steps.jadx-cache.outputs.cache-hit != 'true'
-        run: |
-          sudo mkdir -p /opt/jadx
-          curl -L -o /tmp/jadx.zip https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip
-          sudo unzip -q -o /tmp/jadx.zip -d /opt/jadx
-          sudo chmod +x /opt/jadx/bin/jadx
-          echo "JADX ready"
+          sudo curl -L -o /opt/baksmali.jar https://github.com/baksmali/smali/releases/download/3.0.9/baksmali-3.0.9-fat.jar
+          test -f /opt/baksmali.jar
+          echo "baksmali ready"
 
       - name: Cache TG Session
         uses: actions/cache@v4
@@ -95,7 +63,7 @@ jobs:
               print("Restored sessions:", sorted(os.listdir("/opt/tg_sessions")))
           PYEOF
 
-      - name: Run dex2jar worker
+      - name: Run Smali worker
         env:
           TELEGRAM_BOT_TOKEN: ${{ github.event.client_payload.bot_token || secrets.TELEGRAM_BOT_TOKEN }}
           PAYLOAD_FILE_URL: ${{ github.event.client_payload.file_url }}
@@ -109,11 +77,12 @@ jobs:
           PAYLOAD_IS_PREMIUM: ${{ github.event.client_payload.is_premium }}
           PAYLOAD_REPORT_URL: ${{ github.event.client_payload.report_url }}
           PAYLOAD_FILE_ID: ${{ github.event.client_payload.file_id }}
+          PAYLOAD_SMALI_MODE: ${{ github.event.action == 'decompile-smali-extract' && 'extract' || 'full' }}
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
 
         run: |
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install -q httpx pyrogram tgcrypto
-          /tmp/venv/bin/python worker_dex2jar.py
-# re-register-2026-08-06
+          /tmp/venv/bin/python worker_smali.py
+# re-register-2026-08-06-v2

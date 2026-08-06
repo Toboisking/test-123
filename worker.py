@@ -7,10 +7,13 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from html import unescape
 from pathlib import Path
 from urllib.parse import unquote
+
+from zip_utils import extract_archive, extract_nested_archives
 
 import httpx
 
@@ -26,16 +29,43 @@ FILENAME = os.environ.get("PAYLOAD_FILENAME", "download")
 JOB_ID = os.environ.get("PAYLOAD_JOB_ID", "")
 IS_ADMIN = os.environ.get("PAYLOAD_IS_ADMIN", "False").lower() == "true"
 IS_PREMIUM = os.environ.get("PAYLOAD_IS_PREMIUM", "False").lower() == "true"
+GDB_SCRIPT = os.environ.get("PAYLOAD_GDB_SCRIPT", "")
 USER_ID = os.environ.get("PAYLOAD_USER_ID", CHAT_ID)
 REPORT_URL = os.environ.get("PAYLOAD_REPORT_URL", "")
 REPORT_TOKEN = BOT_TOKEN
-GDB_SCRIPT = os.environ.get("PAYLOAD_GDB_SCRIPT", "")
 GHIDRA_HOME = Path(os.environ.get("GHIDRA_HOME", "/opt/ghidra"))
 ANALYZE_HEADLESS = GHIDRA_HOME / "support" / "analyzeHeadless"
 SCRIPT_DIR = Path(__file__).resolve().parent / "ghidra_scripts"
 MAX_DOWNLOAD_MB = 2000 if IS_ADMIN else 500
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+CANCEL_MARKER = "Job Cancelled by User"
+CANCELLED = {"v": False}
+
+
+class JobCancelled(BaseException):
+    pass
+
+
+async def cancel_watchdog():
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            while not CANCELLED["v"]:
+                await asyncio.sleep(2)
+                try:
+                    resp = await client.post(
+                        f"{API}/getMessage",
+                        data={"chat_id": CHAT_ID, "message_id": MESSAGE_ID},
+                    )
+                    txt = ((resp.json() or {}).get("result") or {}).get("text") or ""
+                except Exception:
+                    continue
+                if CANCEL_MARKER in txt:
+                    CANCELLED["v"] = True
+                    return
+    except Exception as e:
+        log.warning("Cancel watchdog stopped: %s", e)
 
 
 def check_download_size(total_bytes: int):
@@ -69,6 +99,8 @@ def tg(method: str, **params):
 import json
 
 def edit(text: str, parse_mode: str = None, keep_button: bool = True):
+    if CANCELLED["v"]:
+        return
     params = {"chat_id": CHAT_ID, "message_id": MESSAGE_ID, "text": text}
     if parse_mode:
         params["parse_mode"] = parse_mode
@@ -85,6 +117,15 @@ def progress_bar(pct: float) -> str:
     filled = max(0, min(16, int(val * 16 / 100)))
     bar = "▰" * filled + "▱" * (16 - filled)
     return f"{bar} {val:.2f} %"
+
+
+def proc_cpu_usage(pid: int) -> int:
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            parts = f.read().split()
+        return int(parts[13]) + int(parts[14])
+    except Exception:
+        return -1
 
 
 def apply_memory_settings():
@@ -162,6 +203,8 @@ async def download_url(url: str, dest: Path, on_progress) -> str:
                 downloaded = 0
                 with open(dest, "wb") as fh:
                     async for chunk in resp.aiter_bytes(65536):
+                        if CANCELLED["v"]:
+                            raise JobCancelled()
                         fh.write(chunk)
                         downloaded += len(chunk)
                         if total:
@@ -197,16 +240,23 @@ async def run_ghidra(file_path: Path, work_dir: Path, on_progress) -> dict:
     await on_progress(5, "📥 Importing file into Ghidra...")
 
     async def read_stream():
-        idle = 0
+        last_activity = time.monotonic()
+        last_cpu = proc_cpu_usage(proc.pid)
         while True:
+            if CANCELLED["v"]:
+                proc.kill()
+                raise JobCancelled()
             try:
                 raw = await asyncio.wait_for(proc.stdout.readline(), timeout=60)
-                idle = 0
+                last_activity = time.monotonic()
             except asyncio.TimeoutError:
-                idle += 60
-                if idle >= 1800:
+                cpu = proc_cpu_usage(proc.pid)
+                if cpu > last_cpu:
+                    last_cpu = cpu
+                    last_activity = time.monotonic()
+                elif time.monotonic() - last_activity >= 1800:
                     proc.kill()
-                    raise RuntimeError("Ghidra stalled: no output for 30 minutes")
+                    raise RuntimeError("Ghidra stalled: no CPU activity for 30 minutes")
                 continue
             if not raw:
                 break
@@ -232,8 +282,19 @@ async def run_ghidra(file_path: Path, work_dir: Path, on_progress) -> dict:
     return {"c": out_c, "meta": out_meta, "tail": "\n".join(tail[-40:]), "returncode": rc}
 
 
+def send_document(file_path: Path, caption: str, filename: str):
+    with open(file_path, "rb") as fh:
+        resp = httpx.post(
+            f"{API}/sendDocument",
+            data={"chat_id": CHAT_ID, "caption": caption[:1024], "parse_mode": "HTML"},
+            files={"document": (filename, fh, "application/zip")},
+            timeout=180,
+        )
+    return resp.json()
+
+
 async def run_gdb(file_path: Path, work_dir: Path) -> None:
-    edit("🐞 <b>Running GDB — Connecting to Cloud Server…</b>", parse_mode="HTML")
+    edit("🐞 <b>Running GDB — Connecting to Ghost's Server…</b>", parse_mode="HTML")
     cmds = [c.strip() for c in re.split(r"[;\n]+", GDB_SCRIPT) if c.strip()][:20]
     if not cmds:
         cmds = ["info files"]
@@ -255,9 +316,9 @@ async def run_gdb(file_path: Path, work_dir: Path) -> None:
     if not text.strip():
         edit("❌ GDB gave no output. Check the command syntax.")
         return
-    esc = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     if len(text) <= 3500:
-        edit("<pre>" + esc[:3500] + "</pre>", parse_mode="HTML")
+        from html import escape
+        edit("<pre>" + escape(text[:3500]) + "</pre>", parse_mode="HTML")
     else:
         tmp = work_dir / "gdb_output.txt"
         try:
@@ -265,21 +326,13 @@ async def run_gdb(file_path: Path, work_dir: Path) -> None:
             send_document(tmp, "🐞 <b>GDB output delivered</b> — Powered By @Ghostofhackers", "gdb_output.txt")
             edit("✅ <b>GDB output sent</b> as file (" + str(len(text)) + " chars).", parse_mode="HTML")
         except Exception:
-            edit("<pre>" + esc[:3500] + "</pre>", parse_mode="HTML")
-
-
-def send_document(file_path: Path, caption: str, filename: str):
-    with open(file_path, "rb") as fh:
-        resp = httpx.post(
-            f"{API}/sendDocument",
-            data={"chat_id": CHAT_ID, "caption": caption[:1024], "parse_mode": "HTML"},
-            files={"document": (filename, fh, "application/zip")},
-            timeout=180,
-        )
-    return resp.json()
+            from html import escape
+            edit("<pre>" + escape(text[:3500]) + "</pre>", parse_mode="HTML")
 
 
 def check_zip_limits(file_path: Path):
+    if IS_ADMIN:
+        return
     if Path(FILENAME).suffix.lower() != ".zip":
         return
     import zipfile
@@ -288,7 +341,7 @@ def check_zip_limits(file_path: Path):
     so_dex = sum(1 for n in names if n.lower().endswith((".so", ".dex")))
     apks = sum(1 for n in names if n.lower().endswith(".apk"))
     max_so_dex = 5 if IS_PREMIUM else 1
-    max_apk = 2 if IS_PREMIUM else 0
+    max_apk = 2 if IS_PREMIUM else 1
     if so_dex > max_so_dex:
         raise ValueError(f"ZIP contains {so_dex} .so/.dex files — max {max_so_dex} allowed for {'Premium' if IS_PREMIUM else 'Free'} users.")
     if apks > max_apk:
@@ -323,6 +376,7 @@ async def main():
     if not BOT_TOKEN or not CHAT_ID:
         log.error("Missing env TELEGRAM_BOT_TOKEN / PAYLOAD_CHAT_ID")
         sys.exit(1)
+    asyncio.create_task(cancel_watchdog())
 
     edit("🟢 Job started! Preparing Ghidra engine on cloud server...", parse_mode="HTML")
     apply_memory_settings()
@@ -354,6 +408,8 @@ async def main():
                             done = 0
                             with open(dest, "wb") as fh:
                                 async for chunk in resp.aiter_bytes(65536):
+                                    if CANCELLED["v"]:
+                                        raise JobCancelled()
                                     fh.write(chunk)
                                     done += len(chunk)
                                     if total:
@@ -374,6 +430,9 @@ async def main():
                 )
                 dl_logs = []
                 while True:
+                    if CANCELLED["v"]:
+                        proc.kill()
+                        raise JobCancelled()
                     raw = await proc.stdout.readline()
                     if not raw:
                         break
@@ -419,7 +478,7 @@ async def main():
             edit(f"❌ {e}", keep_button=False)
             return
 
-        edit(f"📥 Downloaded {size/1024/1024:.1f} MB! Starting analysis...")
+        edit(f"📥 Downloaded {size/1024/1024:.1f} MB! Starting Ghidra analysis...")
 
         if GDB_SCRIPT:
             await run_gdb(dest, work_dir)
@@ -440,10 +499,10 @@ async def main():
             extract_dir = work_dir / "extracted_batch"
             extract_dir.mkdir(parents=True, exist_ok=True)
             try:
-                with zipfile.ZipFile(dest, "r") as zf:
-                    zf.extractall(extract_dir)
+                extract_archive(dest, extract_dir)
             except Exception as e:
                 log.warning("ZIP extract error: %s", e)
+            extract_nested_archives(extract_dir, depth=0)
 
             candidates = []
             is_apk = filename.lower().endswith(".apk")
@@ -542,6 +601,9 @@ async def main():
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
                 )
                 while True:
+                    if CANCELLED["v"]:
+                        proc.kill()
+                        raise JobCancelled()
                     raw = await proc.stdout.readline()
                     if not raw:
                         break
@@ -567,4 +629,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except JobCancelled:
+        pass

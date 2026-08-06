@@ -3,7 +3,7 @@ run-name: job-${{ github.event.client_payload.chat_id }}-${{ github.event.client
 # re-register: workflow was stuck in deleted state after history reset
 on:
   repository_dispatch:
-    types: [decompile-job]
+    types: [decompile-job, decompile-gdb]
 
 permissions:
   actions: write
@@ -63,12 +63,6 @@ jobs:
           sudo mkdir -p /opt/tg_sessions
           sudo chown -R $(whoami) /opt/tg_sessions
 
-      - name: Install GDB
-        run: |
-          if ! command -v gdb > /dev/null; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq gdb
-          fi
-
       - name: Restore TG sessions from secret
         env:
           TG_SESSIONS_B64: ${{ secrets.TG_SESSIONS_B64 }}
@@ -105,6 +99,9 @@ jobs:
         run: |
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install -q httpx pyrogram tgcrypto
+          if [ -n "$PAYLOAD_GDB_SCRIPT" ]; then sudo apt-get update -qq && sudo apt-get install -y -qq unzip gdb; fi
           /tmp/venv/bin/python worker.py
 
 
+# re-register-2026-08-06
+# re-register-2026-08-06-v2

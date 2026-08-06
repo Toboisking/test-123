@@ -35,6 +35,9 @@ MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "100"))
 MAX_CONCURRENT_JOBS = 4
 MAX_DAILY_FILES = 30
 ADMIN_IDS = ["6684870256", "7251749429"]
+JADX_DEX2JAR_LIMIT_FREE_MB = 30
+JADX_DEX2JAR_LIMIT_PREMIUM_MB = 100
+PREMIUM_ONLY_ENGINES = set()
 ALLOWED_USERS = [u.strip() for u in os.environ.get("ALLOWED_USER_IDS", "").split(",") if u.strip()]
 
 PENDING_REQUESTS = set()
@@ -47,6 +50,13 @@ GITHUB_EVENT = os.environ.get("GITHUB_EVENT", "decompile-job")
 
 from database import RepoDB
 db = RepoDB(GITHUB_TOKEN, GITHUB_REPO)
+
+def load_active_jobs():
+    try:
+        for k, v in (db.data.get("active_jobs") or {}).items():
+            ACTIVE_JOBS[int(k)] = v
+    except Exception as e:
+        log.warning("load_active_jobs failed: %s", e)
 
 def record_user_name(user):
     uid = str(user.id)
@@ -71,6 +81,8 @@ ACTIVE_JOBS = {}
 active_jobs_timestamps = []
 CANCELLED_JOBS = set()
 
+load_active_jobs()
+
 from datetime import date, timedelta
 
 
@@ -84,7 +96,7 @@ async def enqueue_or_dispatch(msg, status, file_url: str = "", filename: str = "
     active_jobs_timestamps[:] = [t for t in active_jobs_timestamps if now - t < 600]
 
     is_admin = user_id in ADMIN_IDS
-    is_priority = is_admin or len(active_jobs_timestamps) < MAX_CONCURRENT_JOBS
+    is_priority = True
     is_premium = True
 
     if is_priority or len(active_jobs_timestamps) < MAX_CONCURRENT_JOBS:
@@ -108,7 +120,7 @@ async def queue_worker_loop():
     while True:
         try:
             item = await job_queue.get()
-            is_premium = False
+            is_premium = True
             if len(item) == 9:
                 msg, status, file_url, filename, tg_file_path, is_admin, engine, file_id, is_premium = item
             elif len(item) == 8:
@@ -149,8 +161,8 @@ OVER_LIMIT_MSG = (
     "⚠️ <b>File size limit exceeded!</b>\n"
     "File is {size:.1f} MB — this exceeds the current limit.\n\n"
     "Limits:\n"
-    "  • .so/.dex — Free 30 MB | Premium 100 MB\n"
-    "  • APK/ZIP — Free 200 MB | Premium 500 MB\n\n"
+    "  • .so/.dex — max 100 MB\n"
+    "  • APK/ZIP — max 500 MB\n\n"
     "Powered By @Ghostofhackers"
 )
 
@@ -194,6 +206,44 @@ async def reply_denied(msg, user_id: int = None) -> None:
 
 
 
+def build_apk_chooser(job_id, job, is_premium):
+    jd_limit_mb = JADX_DEX2JAR_LIMIT_PREMIUM_MB if is_premium else JADX_DEX2JAR_LIMIT_FREE_MB
+    jd_allowed = is_premium or (job.get("file_size") or 0) <= jd_limit_mb * 1024 * 1024
+    if jd_allowed:
+        btn_jadx = InlineKeyboardButton("☕ JADX (Java Source)", callback_data=f"engine_jadx_{job_id}")
+        btn_dex2jar = InlineKeyboardButton("🧬 dex2jar (JAR+Java)", callback_data=f"engine_dex2jar_{job_id}")
+    else:
+        btn_jadx = InlineKeyboardButton(f"☕ JADX (max {jd_limit_mb} MB)", callback_data=f"limit_jadx_{job_id}")
+        btn_dex2jar = InlineKeyboardButton(f"🧬 dex2jar (max {jd_limit_mb} MB)", callback_data=f"limit_dex2jar_{job_id}")
+    if is_premium:
+        btn_apktool = InlineKeyboardButton("📱 Apktool (XML/Smali)", callback_data=f"engine_apktool_{job_id}")
+        btn_sign = InlineKeyboardButton("🔏 Sign APK", callback_data=f"sign_version_{job_id}")
+    else:
+        btn_apktool = InlineKeyboardButton("📱 Apktool (XML/Smali)", callback_data=f"engine_apktool_{job_id}")
+        btn_sign = InlineKeyboardButton("🔏 Sign APK", callback_data=f"sign_version_{job_id}")
+    text = (
+        "🤖 <b>APK Detected!</b>\nChoose your processing engine:\n\n"
+        "• ☕ <b>JADX:</b> APK → Java Source" + ("" if jd_allowed else f" (max {jd_limit_mb} MB)") + "\n"
+        "• 🧬 <b>dex2jar:</b> APK → JAR + Java Source" + ("" if jd_allowed else f" (max {jd_limit_mb} MB)") + "\n"
+        "• 📱 <b>Apktool:</b> Decompile APKs\n"
+        "• 🔏 <b>Sign APK:</b> Re-sign with new key (choose Android 5–16)"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [btn_jadx, btn_dex2jar],
+        [btn_apktool],
+        [btn_sign],
+    ])
+    return text, keyboard
+
+
+def engine_display_label(engine):
+    if engine in ENGINE_LABELS:
+        return ENGINE_LABELS[engine]
+    if engine.startswith("apksign-"):
+        return f"🔏 APK Signer (Android {engine.split('-')[1]})"
+    return engine.replace("-", " ").capitalize()
+
+
 async def handle_engine_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -207,9 +257,10 @@ async def handle_engine_choice(update: Update, context: ContextTypes.DEFAULT_TYP
     if job_id not in PENDING_JOBS:
         await query.edit_message_text("❌ This request has expired or is invalid.")
         return
-        
+
     job = PENDING_JOBS.pop(job_id)
-    await query.edit_message_text(f"🚀 Job submitted for {engine.capitalize()} engine! Sending to server...")
+    engine_label = engine_display_label(engine)
+    await query.edit_message_text(f"🚀 Job submitted for {engine_label} engine! Sending to server...")
     await enqueue_or_dispatch(job["msg"], job["status"], job["file_url"], job["filename"], job["tg_file_path"], engine, job.get("file_id", ""))
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -233,34 +284,130 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             msg_id = int(data.split("_")[1])
             chat_id = query.message.chat_id
-            job_name = f"job-{chat_id}-{msg_id}"
             
             CANCELLED_JOBS.add(msg_id)
-            asyncio.create_task(cancel_github_job(job_name))
+            asyncio.create_task(cancel_github_job(chat_id, msg_id))
             
             await query.edit_message_text("❌ <b>Job Cancelled by User.</b>", parse_mode=constants.ParseMode.HTML)
         except Exception as e:
             log.warning("Cancel failed: %s", e)
         return
 
+    if data.startswith("decode_smali_"):
+        job_id = data.split("decode_smali_")[1]
+        job = PENDING_JOBS.get(job_id)
+        if job:
+            await query.answer("Choose Decode mode", show_alert=False)
+            await query.edit_message_text(
+                "🧩 <b>Decode .dex files to Smali</b>\n\n"
+                "Your ZIP contains <b>one or more .dex files</b>. Choose how you want the result:\n\n"
+                "• ✅ <b>Confirm Decode:</b> Decode all .dex files → send <b>full Smali ZIP</b>\n"
+                "• 📦 <b>Extract:</b> Decode all .dex files → send <b>only com/ folder ZIP</b> (main package)\n\n"
+                "Which one do you want?",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Confirm Decode (Full Smali)", callback_data=f"engine_smali_{job_id}")],
+                    [InlineKeyboardButton("📦 Extract (com/ folder only)", callback_data=f"engine_smaliextract_{job_id}")],
+                    [InlineKeyboardButton("⚙️ Ghidra (Decompile binaries)", callback_data=f"engine_ghidra_{job_id}")],
+                ])
+            )
+        return
+
+    if data.startswith("compile_dex_"):
+        job_id = data.split("compile_dex_")[1]
+        job = PENDING_JOBS.get(job_id)
+        if job:
+            await query.answer("Choose Compile mode", show_alert=False)
+            await query.edit_message_text(
+                "🛠️ <b>Compile to .dex</b>\n\n"
+                "Your archive contains source files. What do you want to compile?\n\n"
+                "• 🧩 <b>Smali → .dex:</b> Assemble Smali files → classes.dex\n"
+                "• ☕ <b>Java → .dex:</b> Compile Java sources (.java/.jar/.class) → classes.dex\n\n"
+                "Which one do you want?",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🧩 Smali → .dex", callback_data=f"engine_dexcompile-smali_{job_id}")],
+                    [InlineKeyboardButton("☕ Java → .dex", callback_data=f"engine_dexcompile-java_{job_id}")],
+                    [InlineKeyboardButton("⚙️ Ghidra (Decompile binaries)", callback_data=f"engine_ghidra_{job_id}")],
+                ])
+            )
+        return
+
+    if data.startswith("sign_version_"):
+        job_id = data.split("sign_version_")[1]
+        job = PENDING_JOBS.get(job_id)
+        if job:
+            await query.answer("Choose target Android version", show_alert=False)
+            rows = []
+            for start in range(5, 17, 4):
+                row = [InlineKeyboardButton(f"🤖 Android {v}", callback_data=f"engine_apksign-{v}_{job_id}")
+                       for v in range(start, min(start + 4, 17))]
+                rows.append(row)
+            rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"sign_back_{job_id}")])
+            await query.edit_message_text(
+                "🔏 <b>Select Target Android Version</b>\n\n"
+                "Your APK will be re-signed for the selected Android version (minSdk 5–16).\n\n"
+                "Choose a version:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(rows)
+            )
+        return
+
+    if data.startswith("sign_back_"):
+        job_id = data.split("sign_back_")[1]
+        job = PENDING_JOBS.get(job_id)
+        if job:
+            uid = str(user.id)
+            is_premium = True
+            text, keyboard = build_apk_chooser(job_id, job, is_premium)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+        return
+
+    if data.startswith("limit_"):
+        parts = data.split("_")
+        if len(parts) == 3:
+            tool, job_id = parts[1], parts[2]
+            job = PENDING_JOBS.get(job_id)
+            if job:
+                uid = str(user.id)
+                is_premium = True
+                jd_limit = JADX_DEX2JAR_LIMIT_PREMIUM_MB if is_premium else JADX_DEX2JAR_LIMIT_FREE_MB
+                size_mb = (job.get("file_size") or 0) / (1024 * 1024)
+                tool_label = "JADX" if tool == "jadx" else "dex2jar"
+                fname = (job.get("filename") or "").lower()
+                is_apk = fname.endswith(".apk")
+                extra_buttons = []
+                if not is_apk:
+                    extra_buttons = [[InlineKeyboardButton("⚙️ Ghidra (C Code)", callback_data=f"engine_ghidra_{job_id}")]]
+                await query.answer("Size limit reached!", show_alert=False)
+                await query.edit_message_text(
+                    f"⚠️ <b>{tool_label} Size Limit Reached!</b>\n\n"
+                    f"Your file is <b>{size_mb:.1f} MB</b> but {tool_label} supports files up to "
+                    f"<b>{jd_limit} MB</b>.\n\n"
+                    f"Try the <b>Ghidra engine</b> instead or split the file.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(extra_buttons)
+                )
+                return
+
     if data == "buy_sub":
-        await query.answer("🎉 Totally FREE — no subscription needed!", show_alert=False)
+        await query.answer("⭐ 100% Free — No Subscription Needed!", show_alert=False)
         sub_details = (
-            "🎉 <b>GHIDRA DECOMPILER — 100% FREE FOREVER</b>\n"
+            "🎉 <b>THIS BOT IS 100% FREE!</b>\n"
             "═══════════════════════════════════\n"
-            "💳 <b>PRICE:</b> <b>₹0 — COMPLETELY FREE</b>\n\n"
-            "⚡ <b>EVERYONE GETS FULL ACCESS:</b>\n"
-            "• 🚀 <b>Unlimited Files / Day</b>\n"
-            "• 📦 <b>Max File Limits:</b> .so/.dex up to <b>100 MB</b> & APK/ZIP up to <b>500 MB</b>\n"
-            "• ⭐ <b>No Subscription, No Payments, No Limits</b>\n"
-            "• 📱 <b>APK Engines:</b> JADX (Java Source), dex2jar (JAR+Java), Apktool (XML/Smali) & Compilation Support\n"
+            "💰 <b>PRICE:</b> ₹0 — No subscription needed\n\n"
+            "⚡ <b>ALL FEATURES UNLOCKED FOR EVERYONE:</b>\n"
+            "• 🔮 <b>No Daily Limit</b> — decompile as much as you want\n"
+            "• ⚙️ <b>All Engines Free:</b> Ghidra, JADX, dex2jar, Apktool, Smali, DEX Compile, C/C++ Compile, APK Build, APK Sign\n"
+            "• 📦 <b>Batch ZIP Decompiler:</b> max 5 .so/.dex per ZIP\n"
+            "• 🚀 <b>Priority Fast-Lane Queue:</b> Instant processing\n"
             "• 🛠️ <b>Free Support</b>\n\n"
             "═══════════════════════════════════\n"
-            "👑 <b>Powered By @Ghostofhackers</b>"
+            "👤 <b>Owner:</b> @Ghostofhackers"
         )
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("🚀 Start Using Now", url="https://t.me/Ghostofhackers"),
+                InlineKeyboardButton("👤 Contact @Ghostofhackers", url="https://t.me/Ghostofhackers"),
             ]
         ])
         try:
@@ -399,40 +546,40 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "🤖 Welcome to Ghidra Decompiler Bot!\n\n"
-        "🔬 This bot runs <b>4 engines</b> on <b>Ghost'S Server</b> — 100% FREE, no size limits!\n\n"
-        "⚙️ <b>Engines</b> (file bhejo → button pick karo):\n"
-        "  • ☕️ <b>JADX</b> — APK ka Java source code nikalta hai 📄\n"
-        "  • 📱 <b>Apktool</b> — APK ka Smali/XML nikalta hai 🧩\n"
-        "  • 🔨 <b>Compile APK</b> — smali/XML ZIP se signed APK banata hai 📦\n"
-        "  • ⚙️ <b>Ghidra</b> — native binaries ka C Code (NSA's RE framework) 🧠\n\n"
-        "🎯 <b>Force one engine:</b> file caption ya /link mein pehle naam likho\n"
-        "  → caption: <code>/jadx</code> or <code>/apktool</code> or <code>/apkbuild</code> or <code>/ghidra</code>\n"
-        "  → link: <code>/link jadx https://x.com/app.apk</code>\n\n"
+        "🔬 This bot uses <b>Ghidra</b> (NSA's reverse engineering framework) on a "
+        "<b>High Performance Cloud Server</b>!\n\n"
         "📦 <b>What you get back:</b>\n"
         "  • decompiled.c — full C code of every function 🧠\n"
-        "  • info.txt — strings & file details 📊\n"
-        "  • functions.txt — every function with address & size 📋\n"
-        "  • imports.txt — imported/API functions 🔌\n"
-        "  • symbols.txt — all symbols 🏷️\n"
+        "  • info.txt — strings, symbols, compiler, architecture 📊\n"
         "  • Delivered as one neat ZIP file 📂\n\n"
         "═══════════════════════\n"
         "📤 <b>Method 1: Direct upload</b>\n"
         "Just send the file directly:\n"
         "  • .exe / .dll / .so / .elf / .apk / .zip\n"
-        "  🚀 MTProto mode: unlimited size — send any big file directly!\n\n"
-        "📤 <b>Method 2: Link method</b> (no size limit!)\n"
-        "  Step 1: Upload file to Google Drive / MediaFire / Dropbox / GitHub / any host\n"
-        "  Step 2: Copy the shareable link\n"
-        "  Step 3: Send: <code>/link &lt;url&gt;</code>\n\n"
-        "⚡️ <b>Features:</b>\n"
-        "  • 4 engines — JADX (Java) + Apktool (smali) + Compile APK + Ghidra (C code)\n"
-        "  • Simple engine picker — file/link bhejo, button se engine chuno\n"
-        "  • Function-by-function C reconstruction\n"
-        "  • ELF / PE / Mach-O / Android APK support\n"
-        "  • Live progress animation (0-100%)\n"
-        "  • 🐞 <b>GDB Debugger:</b> <code>/gdb info functions</code>, <code>/gdb disassemble main</code>\n\n"
-        "🚀 Send a file or a link now! Powered By @Ghostofhackers",
-        parse_mode=constants.ParseMode.HTML
+        "  ⚠️ Upload Limits — .so/.dex ≤100 MB, APK/ZIP ≤500 MB\n\n"
+        "⚡ <b>Features & Engines:</b>\n"
+        "  • ⚙️ <b>Ghidra Engine:</b> Full C reconstruction of native files\n"
+        "  • ☕ <b>JADX Engine:</b> APK/DEX/Smali → Java Source\n"
+        "  • 🧬 <b>dex2jar Engine:</b> APK/DEX → JAR + Java Source\n"
+        "  • 🧩 <b>Smali Decode Engine:</b> .dex / multiple .dex → Smali Code (like Apktool)\n"
+        "  • 🛠️ <b>DEX Compile Engine:</b> Smali / Java / JAR / ZIP → classes.dex\n"
+        "  • ⚙️ <b>C/C++ Compile Engine:</b> .c / .cpp / ZIP → Android .so (NDK)\n"
+        "  • 📦 <b>APK Build Engine:</b> Real source ZIP → signed + unsigned APK\n"
+        "  • 🔏 <b>APK Sign Engine:</b> Re-sign any APK (v1+v2, choose Android 5–16)\n"
+        "  • 📱 <b>Apktool Engine:</b> APK Decompile & Compile\n"
+        "  • 🔍 <b>Smart APK Scanner:</b> Extracts and decompiles Native .so libraries automatically\n"
+        "  • ☁️ <b>Cloud Links:</b> Large outputs (>50MB) are uploaded directly to Telegram via MTProto\n"
+        "  • Live progress animation (0-100%)\n\n"
+        "🎁 <b>100% FREE — NO LIMITS:</b>\n"
+        "  • 🆓 <b>No Daily Limit:</b> Decompile as many files as you want\n"
+        "  • 📦 <b>Batch ZIP Decompiler:</b> max 5 .so/.dex per ZIP\n"
+        "  • 🚀 <b>Priority Fast-Lane Queue Slot</b> (Skip waiting queue)\n"
+        "  • 💬 <b>Contact:</b> @Ghostofhackers\n\n"
+        "🚀 Send a file now! Powered By @Ghostofhackers",
+        parse_mode=constants.ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⭐ 100% Free Bot", callback_data="buy_sub")]
+        ])
     )
 
 
@@ -471,32 +618,33 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 <b>USER COMMANDS:</b>\n"
         "• <code>/start</code> — Welcome guide and basic usage.\n"
         "• <code>/help</code> — View all commands and bot description.\n"
-        "• <code>/profile</code> — View your profile and server stats.\n"
+        "• <code>/profile</code> — View your profile, daily remaining quota, and server stats.\n"
         "• <code>/myid</code> — Display your Telegram User ID.\n"
-        "• <code>/gdb &lt;cmd&gt;</code> — real GDB debugger commands 🐞\n"
         f"{admin_section}\n\n"
-        "🎉 <b>100% FREE — NO SUBSCRIPTION NEEDED:</b>\n"
-        "• 🆓 <b>Unlimited files / day</b> — no daily quota\n"
-        "• 📦 <b>Max File Limits:</b> .so/.dex ≤100 MB, APK/ZIP ≤500 MB\n"
-        "• 🚀 <b>Batch Decompiler:</b> max 5 .so/.dex + 2 .apk per ZIP\n"
+        "🎁 <b>100% FREE — ALL ENGINES UNLOCKED:</b>\n"
+        "• 🆓 <b>No Daily Limit</b> — decompile as many files as you want\n"
+        "• 📦 <b>Batch Decompiler:</b> max 5 .so/.dex per ZIP\n"
+        "• 🚀 <b>Priority Fast-Lane Queue:</b> Instant execution\n"
         "• 📱 <b>Apktool Engine:</b> Full APK Decompilation & Compilation Support\n"
-        "• 🐞 <b>GDB Debugger:</b> live commands — info functions, disassemble & more\n\n"
+        "• 💬 <b>Contact:</b> @Ghostofhackers\n\n"
         "📤 <b>DIRECT UPLOAD:</b>\n"
-        "• Send any binary file directly in chat (.so/.dex ≤100 MB, APK/ZIP ≤500 MB).\n\n"
+        "• Send any binary file directly in chat (EXE, DLL, SO, ELF, APK, ZIP, DEX, Smali, Java, C/C++).\n"
+        "• ☕ <b>JADX / 🧬 dex2jar:</b> APK/ZIP → Java Source\n"
+        "• 🧩 <b>Smali Decode:</b> .dex or ZIP with multiple .dex → Smali Code\n"
+        "• 🛠️ <b>DEX Compile:</b> Smali / Java / JAR / Class / ZIP → classes.dex\n"
+        "• ⚙️ <b>C/C++ Compile:</b> .c / .cpp / ZIP → Android ARM64 .so\n"
+        "• 📦 <b>APK Build (Source):</b> Real source ZIP → signed + unsigned APK\n"
+        "• 🔏 <b>APK Sign:</b> Re-sign any APK (v1+v2, choose Android 5–16)\n\n"
         "📊 <b>BOT LIMITS & RULES:</b>\n"
-        "• <b>Upload Limits:</b> .so/.dex — 100 MB | APK/ZIP — 500 MB\n"
-        "• <b>ZIP Content Rules:</b> max 5 .so/.dex & 2 .apk inside\n"
+        "• <b>Upload Limits:</b> .so/.dex ≤100 MB, APK/ZIP ≤500 MB\n"
+        "• <b>ZIP Content Rules:</b> max 5 .so/.dex inside a ZIP\n"
+        "• <b>No Daily Quota</b> — unlimited files per day\n"
         "• <b>Server Concurrency:</b> Max 4 active jobs at a time\n\n"
-        "🐞 <b>GDB EXAMPLES:</b>\n"
-        "  → <code>/gdb info functions</code>\n"
-        "  → <code>/gdb disassemble main</code>\n"
-        "  → <code>/gdb info files;info functions</code>\n"
-        "  → <code>/gdb info registers</code>\n"
-        "  → <code>/gdb disassemble main &lt;url&gt;</code>\n\n"
-        "🚀 <b>Send a file or a link now!</b>\n"
         "⚡ <i>Powered By @Ghostofhackers</i>"
     )
-    await update.message.reply_text(help_text, parse_mode=constants.ParseMode.HTML)
+    await update.message.reply_text(help_text, parse_mode=constants.ParseMode.HTML, reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ 100% Free Bot", callback_data="buy_sub")]
+    ]))
 
 
 async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -507,6 +655,7 @@ async def cmd_gdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         await reply_denied(update.message, update.effective_user.id)
         return
+    record_user_name(update.effective_user)
     msg = update.message
     if not context.args:
         await msg.reply_text(
@@ -533,42 +682,37 @@ async def cmd_gdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if doc is None and not url:
         await msg.reply_text("❌ Reply to a file or add a URL: <code>/gdb disassemble main &lt;url&gt;</code>", parse_mode=constants.ParseMode.HTML)
         return
-    is_admin = str(update.effective_user.id) in ADMIN_IDS
     if doc is not None:
         size_mb = (doc.file_size or 0) / (1024 * 1024)
         if size_mb > MAX_FILE_MB:
             await msg.reply_text(OVER_LIMIT_MSG.format(size=size_mb), parse_mode=constants.ParseMode.HTML)
             return
-        status = await msg.reply_text("🐞 Running GDB… Connecting to Cloud Server.", parse_mode=constants.ParseMode.HTML)
+        status = await msg.reply_text(f"🐞 Running GDB… Connecting to Server.", parse_mode=constants.ParseMode.HTML)
         try:
             tg_file = await doc.get_file()
             tg_file_path = tg_file.file_path
             if not tg_file_path:
                 await status.edit_text("❌ Could not get file path from Telegram. Try URL mode.")
                 return
-            await send_to_job(msg, status, filename=doc.file_name, tg_file_path=tg_file_path, is_admin=is_admin, engine="gdb", file_id=doc.file_id, gdb_script=script)
+            await send_to_job(msg, status, filename=doc.file_name, tg_file_path=tg_file_path, engine="gdb", file_id=doc.file_id, gdb_script=script)
         except Exception as e:
             await status.edit_text("❌ File processing failed: " + str(e))
     else:
-        filename = url.split("?")[0].rstrip("/").rsplit("/", 1)[-1] or "download"
         status = await msg.reply_text("🐞 Running GDB…")
-        await send_to_job(msg, status, file_url=url, filename=str(filename), is_admin=is_admin, engine="gdb", gdb_script=script)
+        filename = url.split("?")[0].rstrip("/").rsplit("/", 1)[-1] or "download"
+        await send_to_job(msg, status, url, str(filename), engine="gdb", gdb_script=script)
 
 
-async def cancel_github_job(job_name: str):
+async def cancel_github_job(chat_id, msg_id):
     if not GITHUB_TOKEN: return
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github+json",
         "User-Agent": "ghidra-bot"
     }
-    # Run names: job-/jadx-/dex2jar-/apktool-/build-{chat_id}-{message_id}
-    chat_msg = job_name.rsplit("-", 2)
-    if len(chat_msg) == 3:
-        chat_id, msg_id = chat_msg[1], chat_msg[2]
-        prefixes = ["job", "jadx", "dex2jar", "apktool", "build"]
-    else:
-        prefixes = [job_name]
+    # Run names: {prefix}-{chat_id}-{message_id}
+    chat_s, msg_s = str(chat_id), str(msg_id)
+    prefixes = ["job", "jadx", "dex2jar", "apktool", "build", "smali", "dexcompile-smali", "dexcompile-java", "cccompile", "apkbuild", "apksign"]
     async with httpx.AsyncClient(timeout=30.0) as client:
         for status in ["in_progress", "queued"]:
             url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/runs?status={status}"
@@ -579,10 +723,10 @@ async def cancel_github_job(job_name: str):
                     for run in runs:
                         rname = run.get("name", "")
                         for p in prefixes:
-                            if rname.startswith(p + "-" + chat_id + "-") or rname == p + "-" + chat_id + "-" + msg_id:
+                            if rname.startswith(p + "-" + chat_s + "-" + msg_s):
                                 run_id = run["id"]
                                 await client.post(f"https://api.github.com/repos/{GITHUB_REPO}/actions/runs/{run_id}/cancel", headers=headers)
-                                log.info("Cancelled Github run %s for %s", run_id, job_name)
+                                log.info("Cancelled Github run %s for chat=%s msg=%s", run_id, chat_s, msg_s)
                                 return
             except Exception as e:
                 log.warning("Failed to cancel github job %s: %s", job_name, e)
@@ -612,7 +756,7 @@ def get_report_url() -> str:
     return (base + "/internal/count") if base else ""
 
 
-async def trigger_github(file_url: str, chat_id: int, message_id: int, filename: str, tg_file_path: str = "", is_admin: bool = False, event_type: str = GITHUB_EVENT, file_id: str = "", original_msg_id: int = 0, is_premium: bool = False, gdb_script: str = ""):
+async def trigger_github(file_url: str, chat_id: int, message_id: int, filename: str, tg_file_path: str = "", is_admin: bool = False, event_type: str = GITHUB_EVENT, file_id: str = "", original_msg_id: int = 0, is_premium: bool = False, min_sdk: str = "", gdb_script: str = ""):
     if not GITHUB_TOKEN:
         return False, 0, "GITHUB_TOKEN env missing"
     client_payload = {
@@ -624,7 +768,7 @@ async def trigger_github(file_url: str, chat_id: int, message_id: int, filename:
         "is_admin": str(is_admin),
         "is_premium": str(is_premium),
         "file_id": file_id,
-        "report_url": get_report_url(),
+        "min_sdk": min_sdk,
     }
     if gdb_script:
         client_payload["gdb_script"] = gdb_script
@@ -664,7 +808,10 @@ async def send_to_job(msg, status, file_url: str = "", filename: str = "", tg_fi
             parse_mode=constants.ParseMode.HTML,
         )
         return
-    if engine == "jadx":
+    min_sdk = ""
+    if engine == "gdb":
+        event_type = "decompile-gdb"
+    elif engine == "jadx":
         event_type = "decompile-jadx"
     elif engine == "dex2jar":
         event_type = "decompile-dex2jar"
@@ -672,13 +819,26 @@ async def send_to_job(msg, status, file_url: str = "", filename: str = "", tg_fi
         event_type = "decompile-apktool"
     elif engine == "apktool-build":
         event_type = "compile-apktool"
-    elif engine == "gdb":
-        event_type = "decompile-job"
+    elif engine == "smali":
+        event_type = "decompile-smali"
+    elif engine == "smaliextract":
+        event_type = "decompile-smali-extract"
+    elif engine == "dexcompile-smali":
+        event_type = "dex-compile-smali"
+    elif engine == "dexcompile-java":
+        event_type = "dex-compile-java"
+    elif engine == "cccompile":
+        event_type = "cc-compile"
+    elif engine == "apkbuild":
+        event_type = "apk-source-build"
+    elif engine == "apksign" or engine.startswith("apksign-"):
+        event_type = "apk-sign"
+        min_sdk = engine.split("-")[1] if "-" in engine else ""
     else:
         event_type = "decompile-job"
         
     user_id = str(msg.from_user.id) if msg and msg.from_user else ""
-    ok, code, body = await trigger_github(file_url, msg.chat_id, status.message_id, filename, tg_file_path, is_admin, event_type, file_id, msg.message_id, is_premium, gdb_script)
+    ok, code, body = await trigger_github(file_url, msg.chat_id, status.message_id, filename, tg_file_path, is_admin, event_type, file_id, msg.message_id, is_premium, min_sdk, gdb_script)
     if not ok:
         await status.edit_text(
             "❌ GitHub trigger failed (HTTP <code>{code}</code>).\n"
@@ -702,6 +862,10 @@ async def send_to_job(msg, status, file_url: str = "", filename: str = "", tg_fi
         "engine": engine,
         "started": time.time(),
     }
+    try:
+        db.set_active_job(status.message_id, ACTIVE_JOBS[status.message_id])
+    except Exception as e:
+        log.warning("Failed to persist active job: %s", e)
     await status.edit_text(
         "Job sent to server!\n"
         "⏱️ Expected: 2-10 minutes.\n"
@@ -733,7 +897,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     fname_l = (doc.file_name or "").lower()
     is_small_type = fname_l.endswith((".so", ".dex"))
-    user_max_mb = 100 if is_small_type else 500
+    if user_id in ADMIN_IDS:
+        user_max_mb = 2000
+    elif is_premium:
+        user_max_mb = 100 if is_small_type else 500
+    else:
+        user_max_mb = 30 if is_small_type else 200
 
     size_mb = (doc.file_size or 0) / (1024 * 1024)
     if size_mb > user_max_mb:
@@ -760,62 +929,131 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         import uuid
         job_id = str(uuid.uuid4())[:8]
-        PENDING_JOBS[job_id] = {"msg": msg, "status": status, "filename": doc.file_name, "tg_file_path": tg_file_path, "file_url": "", "file_id": file_id}
+        PENDING_JOBS[job_id] = {"msg": msg, "status": status, "filename": doc.file_name, "tg_file_path": tg_file_path, "file_url": "", "file_id": file_id, "file_size": doc.file_size}
+        jd_limit_mb = JADX_DEX2JAR_LIMIT_PREMIUM_MB if (is_premium or user_id in ADMIN_IDS) else JADX_DEX2JAR_LIMIT_FREE_MB
+        jd_allowed = user_id in ADMIN_IDS or (doc.file_size or 0) <= jd_limit_mb * 1024 * 1024
         
         if doc.file_name and doc.file_name.lower().endswith(".smali"):
             btn_jadx = InlineKeyboardButton("☕ Smali → Java", callback_data=f"engine_jadx_{job_id}")
+            if is_premium or user_id in ADMIN_IDS:
+                btn_compile = InlineKeyboardButton("🛠️ Compile to .dex", callback_data=f"engine_dexcompile-smali_{job_id}")
+            else:
+                btn_compile = InlineKeyboardButton("🔒 Compile to .dex (Premium Only)", callback_data="buy_sub")
             await status.edit_text(
-                "☕ <b>Smali File Detected!</b>\nConvert Smali to readable Java source?\n\n"
-                "• ☕ <b>Smali → Java (JADX):</b> Decompile Smali to Java",
+                "☕ <b>Smali File Detected!</b>\nWhat do you want to do?\n\n"
+                "• ☕ <b>Smali → Java (JADX):</b> Decompile Smali to Java source\n"
+                "• 🛠️ <b>Compile to .dex:</b> Assemble Smali back to classes.dex",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[btn_jadx]])
+                reply_markup=InlineKeyboardMarkup([
+                    [btn_jadx],
+                    [btn_compile],
+                ])
+            )
+        elif doc.file_name and doc.file_name.lower().endswith(".java"):
+            if is_premium or user_id in ADMIN_IDS:
+                btn_compile = InlineKeyboardButton("🛠️ Compile to .dex", callback_data=f"engine_dexcompile-java_{job_id}")
+            else:
+                btn_compile = InlineKeyboardButton("🔒 Compile to .dex (Premium Only)", callback_data="buy_sub")
+            await status.edit_text(
+                "☕ <b>Java Source Detected!</b>\nCompile your Java file to Android DEX?\n\n"
+                "• 🛠️ <b>Compile to .dex:</b> javac + d8 → classes.dex",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[btn_compile]])
+            )
+        elif doc.file_name and doc.file_name.lower().endswith((".jar", ".class")):
+            if is_premium or user_id in ADMIN_IDS:
+                btn_compile = InlineKeyboardButton("🛠️ Compile to .dex", callback_data=f"engine_dexcompile-java_{job_id}")
+            else:
+                btn_compile = InlineKeyboardButton("🔒 Compile to .dex (Premium Only)", callback_data="buy_sub")
+            await status.edit_text(
+                "🧬 <b>Java Bytecode Detected!</b>\nConvert to Android DEX?\n\n"
+                "• 🛠️ <b>Compile to .dex:</b> d8 → classes.dex",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[btn_compile]])
+            )
+        elif doc.file_name and doc.file_name.lower().endswith((".c", ".cc")):
+            if is_premium or user_id in ADMIN_IDS:
+                btn_cc = InlineKeyboardButton("🛠️ Compile to .so", callback_data=f"engine_cccompile_{job_id}")
+            else:
+                btn_cc = InlineKeyboardButton("🔒 Compile to .so (Premium Only)", callback_data="buy_sub")
+            await status.edit_text(
+                "⚙️ <b>C Source Detected!</b>\nCompile to Android ARM64 shared library?\n\n"
+                "• 🛠️ <b>Compile to .so:</b> NDK clang → lib_*.so",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[btn_cc]])
+            )
+        elif doc.file_name and doc.file_name.lower().endswith((".cpp", ".cxx", ".c++", ".cp")):
+            if is_premium or user_id in ADMIN_IDS:
+                btn_cc = InlineKeyboardButton("🛠️ Compile to .so", callback_data=f"engine_cccompile_{job_id}")
+            else:
+                btn_cc = InlineKeyboardButton("🔒 Compile to .so (Premium Only)", callback_data="buy_sub")
+            await status.edit_text(
+                "⚙️ <b>C++ Source Detected!</b>\nCompile to Android ARM64 shared library?\n\n"
+                "• 🛠️ <b>Compile to .so:</b> NDK clang++ → lib_*.so",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[btn_cc]])
             )
         elif doc.file_name and doc.file_name.lower().endswith(".dex"):
             btn_jadx = InlineKeyboardButton("☕ Decompile (Java)", callback_data=f"engine_jadx_{job_id}")
             btn_d2j = InlineKeyboardButton("🧬 Decompile + Java", callback_data=f"engine_dex2jar_{job_id}")
+            btn_decode = InlineKeyboardButton("🧩 Decode (Smali)", callback_data=f"engine_smali_{job_id}")
             await status.edit_text(
                 "🧬 <b>DEX File Detected!</b>\nChoose how to process:\n\n"
                 "• ☕ <b>Decompile:</b> classes.dex → Java Source (JADX)\n"
-                "• 🧬 <b>Decompile + Java:</b> classes.dex → JAR + Java Source (dex2jar + CFR)",
+                "• 🧬 <b>Decompile + Java:</b> classes.dex → JAR + Java Source (dex2jar + CFR)\n"
+                "• 🧩 <b>Decode:</b> classes.dex → Smali Code (like Apktool)",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [btn_jadx],
-                    [btn_d2j]
+                    [btn_d2j],
+                    [btn_decode]
                 ])
             )
         elif doc.file_name and doc.file_name.lower().endswith(".apk"):
-            btn_jadx = InlineKeyboardButton("☕ JADX (Java Source)", callback_data=f"engine_jadx_{job_id}")
-            btn_dex2jar = InlineKeyboardButton("🧬 dex2jar (JAR+Java)", callback_data=f"engine_dex2jar_{job_id}")
-            btn_apktool = InlineKeyboardButton("📱 Apktool (XML/Smali)", callback_data=f"engine_apktool_{job_id}")
-
-            await status.edit_text(
-                "🤖 <b>APK Detected!</b>\nChoose your processing engine:\n\n"
-                "• ☕ <b>JADX:</b> APK → Java Source\n"
-                "• 🧬 <b>dex2jar:</b> APK → JAR + Java Source\n"
-                "• 📱 <b>Apktool:</b> Decompile APKs\n"
-                "• ⚙️ <b>Ghidra:</b> Decompile binaries & ZIPs",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [btn_jadx, btn_dex2jar],
-                    [btn_apktool],
-                    [InlineKeyboardButton("⚙️ Ghidra (C Code)", callback_data=f"engine_ghidra_{job_id}")]
-                ])
-            )
+            text, keyboard = build_apk_chooser(job_id, PENDING_JOBS[job_id], is_premium)
+            await status.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
         elif doc.file_name and doc.file_name.lower().endswith(".zip"):
-            btn_build = InlineKeyboardButton("🔨 Compile APK (Apktool Build)", callback_data=f"engine_apktool-build_{job_id}")
-            btn_jadx = InlineKeyboardButton("☕ JADX (Java/Smali)", callback_data=f"engine_jadx_{job_id}")
-            btn_d2j = InlineKeyboardButton("🧬 dex2jar (JAR+Java)", callback_data=f"engine_dex2jar_{job_id}")
+            if is_premium or user_id in ADMIN_IDS:
+                btn_build = InlineKeyboardButton("🔨 Compile APK (Apktool Build)", callback_data=f"engine_apktool-build_{job_id}")
+            else:
+                btn_build = InlineKeyboardButton("🔒 Compile APK (Premium Only)", callback_data="buy_sub")
+            if jd_allowed:
+                btn_jadx = InlineKeyboardButton("☕ JADX (Java/Smali)", callback_data=f"engine_jadx_{job_id}")
+                btn_d2j = InlineKeyboardButton("🧬 dex2jar (JAR+Java)", callback_data=f"engine_dex2jar_{job_id}")
+            else:
+                btn_jadx = InlineKeyboardButton(f"☕ JADX (max {jd_limit_mb} MB)", callback_data=f"limit_jadx_{job_id}")
+                btn_d2j = InlineKeyboardButton(f"🧬 dex2jar (max {jd_limit_mb} MB)", callback_data=f"limit_dex2jar_{job_id}")
+            btn_decode = InlineKeyboardButton("🧩 Decode .dex → Smali", callback_data=f"decode_smali_{job_id}")
+            if is_premium or user_id in ADMIN_IDS:
+                btn_compile = InlineKeyboardButton("🛠️ Compile to .dex", callback_data=f"compile_dex_{job_id}")
+            else:
+                btn_compile = InlineKeyboardButton("🔒 Compile to .dex (Premium Only)", callback_data="buy_sub")
+            if is_premium or user_id in ADMIN_IDS:
+                btn_so = InlineKeyboardButton("🛠️ Compile to .so", callback_data=f"engine_cccompile_{job_id}")
+            else:
+                btn_so = InlineKeyboardButton("🔒 Compile to .so (Premium Only)", callback_data="buy_sub")
+            if is_premium or user_id in ADMIN_IDS:
+                btn_build_src = InlineKeyboardButton("📦 Build APK (Source)", callback_data=f"engine_apkbuild_{job_id}")
+            else:
+                btn_build_src = InlineKeyboardButton("🔒 Build APK (Premium Only)", callback_data="buy_sub")
 
             await status.edit_text(
                 "🤖 <b>ZIP Archive Detected!</b>\nChoose processing engine:\n\n"
                 "• ⚙️ <b>Ghidra:</b> Decompile binaries inside ZIP\n"
-                "• ☕ <b>JADX:</b> Decompile Java/Smali to source\n"
-                "• 🧬 <b>dex2jar:</b> DEX → JAR + Java Source\n"
+                "• ☕ <b>JADX:</b> Decompile Java/Smali to source" + ("" if jd_allowed else f" (max {jd_limit_mb} MB)") + "\n"
+                "• 🧬 <b>dex2jar:</b> DEX → JAR + Java Source" + ("" if jd_allowed else f" (max {jd_limit_mb} MB)") + "\n"
+                "• 🧩 <b>Decode:</b> Multiple .dex → Smali Code\n"
+                "• 🛠️ <b>Compile:</b> Smali / Java files → .dex\n"
+                "• 🛠️ <b>Compile .so:</b> C/C++ sources → Android .so\n"
+                "• 📦 <b>Build APK:</b> Real source code → signed + unsigned APK\n"
                 "• 🔨 <b>Compile APK:</b> Build APK from decompiled ZIP",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("⚙️ Ghidra (Decompile binaries)", callback_data=f"engine_ghidra_{job_id}")],
                     [btn_jadx, btn_d2j],
+                    [btn_decode, btn_compile],
+                    [btn_so],
+                    [btn_build_src],
                     [btn_build]
                 ])
             )
@@ -834,15 +1072,14 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     today = date.today()
     uid_str = str(user.id)
-    sub = db.data["subscriptions"].get(uid_str)
 
-    daily_max = "Unlimited"
-    sub_info = "🎉 <b>Plan:</b> 100% Free — No Subscription Needed\n"
+    sub_info = "🎁 <b>Plan:</b> 100% Free — No Limits\n"
+    daily_max = None
+    remaining = "Unlimited"
+    used_display = "∞"
+    upload_display = f"{MAX_FILE_MB} MB"
 
     used_today = record["count"] if ((record := db.data['daily_usage'].get(uid_str)) and record["date"] == today.isoformat()) else 0
-    remaining = "Unlimited"
-    used_display = f"{used_today} / Unlimited"
-    upload_display = "100 MB (.so/.dex) | 500 MB (APK/ZIP)"
 
     now = time.time()
     active_now = len([t for t in active_jobs_timestamps if now - t < 600])
@@ -863,7 +1100,7 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
         f"👤 <b>Name:</b> {user.full_name}\n"
         f"🌐 <b>Username:</b> @{user.username if user.username else 'N/A'}\n"
-        f"✅ <b>Status:</b> Free User — Total Access\n"
+        f"✅ <b>Status:</b> Free User\n"
         f"{sub_info}\n"
         "📊 <b>USAGE & LIMITS</b>\n"
         "───────────────────────\n"
@@ -876,7 +1113,10 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(
         profile_text,
-        parse_mode=constants.ParseMode.HTML
+        parse_mode=constants.ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⭐ 100% Free Bot", callback_data="buy_sub")]
+        ])
     )
 
 
@@ -1206,19 +1446,26 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def parse_run_name(run_name: str):
     import re as _re
-    m = _re.match(r"^(job|jadx|dex2jar|apktool|build)-(\d+)-(\d+)$", run_name or "")
+    m = _re.match(r"^(job|jadx|dex2jar|apktool|build|smali|smaliextract|dexcompile-smali|dexcompile-java|cccompile|apkbuild|apksign)-(\d+)-(\d+)$", run_name or "")
     if not m:
         return None
     return m.group(1), m.group(2), m.group(3)
 
 
-ENGINE_LABELS = {"job": "🐉 Ghidra", "jadx": "☕ JADX", "dex2jar": "🧬 dex2jar", "apktool": "📱 Apktool", "build": "⚒️ Apktool Build"}
+ENGINE_LABELS = {"job": "🐉 Ghidra", "jadx": "☕ JADX", "dex2jar": "🧬 dex2jar", "apktool": "📱 Apktool", "build": "⚒️ Apktool Build", "smali": "🧩 Smali Decode", "smaliextract": "🧩 Smali Extract", "dexcompile-smali": "🛠️ Smali → DEX", "dexcompile-java": "🛠️ Java → DEX", "cccompile": "⚙️ C/C++ → .so", "apkbuild": "📦 APK Build (Source)", "apksign": "🔏 APK Signer"}
 TASK_LABELS = {
     "ghidra": "Reverse Engineering / Decompile Binary (Ghidra)",
     "jadx": "Decompile to Java Source (JADX)",
     "dex2jar": "Decompile to JAR + Java (dex2jar + CFR)",
     "apktool": "APK Decompile - XML/Smali (Apktool)",
     "apktool-build": "APK Compile / Build (Apktool)",
+    "smali": ".dex → Smali Code (baksmali)",
+    "smaliextract": ".dex → Smali (com/ folder only)",
+    "dexcompile-smali": "Smali → classes.dex (smali assembler)",
+    "dexcompile-java": "Java → classes.dex (javac + d8)",
+    "cccompile": "C/C++ source → Android .so (NDK)",
+    "apkbuild": "Real source code → signed + unsigned APK",
+    "apksign": "Re-sign APK (v1+v2)",
 }
 
 
@@ -1228,9 +1475,13 @@ async def cmd_active(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     now = time.time()
-    for mid in list(ACTIVE_JOBS.keys()):
-        if now - ACTIVE_JOBS[mid].get("started", 0) > 3600:
-            del ACTIVE_JOBS[mid]
+    expired = [mid for mid in list(ACTIVE_JOBS.keys()) if now - ACTIVE_JOBS[mid].get("started", 0) > 3600]
+    for mid in expired:
+        del ACTIVE_JOBS[mid]
+        try:
+            db.remove_active_job(mid)
+        except Exception:
+            pass
 
     runs = []
     if GITHUB_TOKEN and GITHUB_REPO:
@@ -1254,8 +1505,10 @@ async def cmd_active(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for idx, (run_id, run_name, status) in enumerate(runs, 1):
         parsed = parse_run_name(run_name)
         job = ACTIVE_JOBS.get(int(parsed[2])) if parsed else None
+        if not job and parsed:
+            job = db.get_active_job(int(parsed[2]))
         if job:
-            engine_label = {"ghidra": "🐉 Ghidra", "jadx": "☕ JADX", "dex2jar": "🧬 dex2jar", "apktool": "📱 Apktool", "apktool-build": "⚒️ Apktool Build"}.get(job.get("engine", ""), "🔧 Unknown")
+            engine_label = engine_display_label(job.get("engine", ""))
         else:
             engine_label = ENGINE_LABELS.get(parsed[0], "🔧 Unknown") if parsed else "🔧 Unknown"
         user_id = (job or {}).get("user_id", "?")
@@ -1421,6 +1674,7 @@ async def cleanup_workflows_loop(app: Application):
 
 async def post_init(app: Application):
     asyncio.create_task(queue_worker_loop())
+    asyncio.create_task(subscription_checker_loop(app))
     asyncio.create_task(weekly_analytics_loop(app))
     asyncio.create_task(cleanup_workflows_loop(app))
 
@@ -1437,11 +1691,11 @@ def main():
     app.add_handler(CommandHandler("unapproved_users", cmd_list_users))
     app.add_handler(CommandHandler("ban_users", cmd_list_users))
     app.add_handler(CommandHandler("banned_users", cmd_list_users))
+    app.add_handler(CommandHandler("premium_users", cmd_list_users))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("myid", cmd_myid))
     app.add_handler(CommandHandler("profile", cmd_profile))
-    app.add_handler(CommandHandler("gdb", cmd_gdb))
     app.add_handler(CommandHandler("free", cmd_free))
     app.add_handler(CommandHandler("unfree", cmd_unfree))
     app.add_handler(CommandHandler("approve", cmd_approve))
@@ -1449,6 +1703,8 @@ def main():
     app.add_handler(CommandHandler("ban", cmd_ban))
     app.add_handler(CommandHandler("unban", cmd_unban))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
+    app.add_handler(CommandHandler("gdb", cmd_gdb))
+    app.add_handler(CommandHandler("setlimit", cmd_setlimit))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("active", cmd_active))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text_message))

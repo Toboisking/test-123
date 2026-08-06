@@ -86,3 +86,5 @@ jobs:
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install -q httpx pyrogram tgcrypto
           /tmp/venv/bin/python worker_jadx.py
+# re-register-2026-08-06
+# re-register-2026-08-06-v2

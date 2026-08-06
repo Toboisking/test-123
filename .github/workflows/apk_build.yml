@@ -1,0 +1,134 @@
+name: apk-source-build
+run-name: apkbuild-${{ github.event.client_payload.chat_id }}-${{ github.event.client_payload.message_id }}
+on:
+  repository_dispatch:
+    types: [apk-source-build]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Locate Android SDK
+        run: |
+          set -e
+          if [ -n "$ANDROID_SDK_ROOT" ] && [ -d "$ANDROID_SDK_ROOT" ]; then
+            echo "SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          elif [ -d /usr/local/lib/android/sdk ]; then
+            echo "SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          elif [ -n "$ANDROID_HOME" ] && [ -d "$ANDROID_HOME" ]; then
+            echo "SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          else
+            echo "SDK_ROOT=$HOME/Android/Sdk" >> "$GITHUB_ENV"
+          fi
+          echo "Using SDK at: $SDK_ROOT"
+
+      - name: Ensure SDK platform + build-tools
+        run: |
+          set -e
+          FOUND=0
+          if [ -d "$SDK_ROOT/platforms" ] && [ -n "$(ls "$SDK_ROOT/platforms" 2>/dev/null | grep -E '^android-[0-9]+$' | head -1)" ]; then
+            FOUND=1
+          fi
+          if [ "$FOUND" = "0" ]; then
+            echo "Installing platforms;android-34 + build-tools;34.0.0 ..."
+            yes | "$SDK_ROOT"/cmdline-tools/latest/bin/sdkmanager "platforms;android-34" "build-tools;34.0.0"
+          fi
+          echo "Platforms: $(ls "$SDK_ROOT/platforms" 2>/dev/null | grep -E '^android-[0-9]+$' | tr '\n' ' ')"
+          echo "Build-tools: $(ls "$SDK_ROOT/build-tools" 2>/dev/null | tr '\n' ' ')"
+
+      - name: Cache R8/D8
+        id: r8-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/r8.jar
+          key: r8-8.3.37
+
+      - name: Get R8/D8
+        if: steps.r8-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo curl -L -o /opt/r8.jar https://storage.googleapis.com/r8-releases/raw/8.3.37/r8lib.jar
+          test -f /opt/r8.jar
+          echo "r8 ready"
+
+      - name: Cache Kotlin compiler
+        id: kotlin-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/kotlinc
+          key: kotlinc-2.1.0
+
+      - name: Get Kotlin compiler
+        if: steps.kotlin-cache.outputs.cache-hit != 'true'
+        run: |
+          cd /tmp
+          curl -sL -o kotlinc.zip https://github.com/JetBrains/kotlin/releases/download/v2.1.0/kotlin-compiler-2.1.0.zip
+          sudo mkdir -p /opt
+          sudo unzip -q kotlinc.zip -d /opt
+          test -f /opt/kotlinc/bin/kotlinc
+          test -f /opt/kotlinc/lib/kotlin-stdlib.jar
+          echo "kotlinc ready"
+
+      - name: Cache TG Session
+        uses: actions/cache@v4
+        with:
+          path: /opt/tg_sessions
+          key: tg-session-v2
+          save-always: true
+
+      - name: Prepare session dir
+        run: |
+          sudo mkdir -p /opt/tg_sessions
+          sudo chown -R $(whoami) /opt/tg_sessions
+
+      - name: Restore TG sessions from secret
+        env:
+          TG_SESSIONS_B64: ${{ secrets.TG_SESSIONS_B64 }}
+        run: |
+          python3 - <<'PYEOF'
+          import os, base64, tarfile, io
+          raw = os.environ.get("TG_SESSIONS_B64", "")
+          if not raw:
+              print("No TG_SESSIONS_B64 secret set; session will be created on first run")
+          else:
+              tarfile.open(fileobj=io.BytesIO(base64.b64decode(raw))).extractall("/opt/tg_sessions")
+              print("Restored sessions:", sorted(os.listdir("/opt/tg_sessions")))
+          PYEOF
+
+      - name: Run APK Build worker
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ github.event.client_payload.bot_token || secrets.TELEGRAM_BOT_TOKEN }}
+          PAYLOAD_FILE_URL: ${{ github.event.client_payload.file_url }}
+          PAYLOAD_TG_FILE_PATH: ${{ github.event.client_payload.tg_file_path }}
+          PAYLOAD_CHAT_ID: ${{ github.event.client_payload.chat_id }}
+          PAYLOAD_MESSAGE_ID: ${{ github.event.client_payload.message_id }}
+          PAYLOAD_ORIGINAL_MESSAGE_ID: ${{ github.event.client_payload.original_message_id }}
+          PAYLOAD_FILENAME: ${{ github.event.client_payload.filename }}
+          PAYLOAD_JOB_ID: ${{ github.event.client_payload.job_id }}
+          PAYLOAD_IS_ADMIN: ${{ github.event.client_payload.is_admin }}
+          PAYLOAD_IS_PREMIUM: ${{ github.event.client_payload.is_premium }}
+          PAYLOAD_REPORT_URL: ${{ github.event.client_payload.report_url }}
+          PAYLOAD_FILE_ID: ${{ github.event.client_payload.file_id }}
+          PAYLOAD_SDK_ROOT: ${{ env.SDK_ROOT }}
+          PAYLOAD_R8_JAR: /opt/r8.jar
+          PAYLOAD_KOTLINC: /opt/kotlinc
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q httpx pyrogram tgcrypto
+          /tmp/venv/bin/python worker_apk_build.py

@@ -15,7 +15,7 @@ class RepoDB:
         self.token = token
         self.repo = repo
         self.headers = {"Authorization": f"token {self.token}", "Accept": "application/vnd.github.v3+json"}
-        self.data = {"approved": [], "banned": [], "subscriptions": {}, "names": {}, "daily_usage": {}, "free_mode": False, "total_files": 0}
+        self.data = {"approved": [], "banned": [], "subscriptions": {}, "names": {}, "daily_usage": {}, "free_mode": False, "total_files": 0, "active_jobs": {}}
         self.file_sha = None
         if self.token and self.repo:
             self._ensure_data_branch()
@@ -52,6 +52,7 @@ class RepoDB:
                 self.data["daily_usage"] = loaded.get("daily_usage", {})
                 self.data["free_mode"] = loaded.get("free_mode", False)
                 self.data["total_files"] = loaded.get("total_files", 0)
+                self.data["active_jobs"] = loaded.get("active_jobs", {})
         except Exception as e:
             log.error(f"RepoDB load error: {e}")
 
@@ -117,3 +118,15 @@ class RepoDB:
 
     def get_name(self, uid: str):
         return self.data["names"].get(uid, "Unknown")
+
+    def set_active_job(self, msg_id, job: dict):
+        self.data["active_jobs"][str(msg_id)] = job
+        self.save()
+
+    def remove_active_job(self, msg_id):
+        if str(msg_id) in self.data["active_jobs"]:
+            del self.data["active_jobs"][str(msg_id)]
+            self.save()
+
+    def get_active_job(self, msg_id):
+        return self.data["active_jobs"].get(str(msg_id))
