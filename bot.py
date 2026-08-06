@@ -399,34 +399,40 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "🤖 Welcome to Ghidra Decompiler Bot!\n\n"
-        "🔬 This bot uses <b>Ghidra</b> (NSA's reverse engineering framework) on a "
-        "<b>High Performance Cloud Server</b>!\n\n"
+        "🔬 This bot runs <b>4 engines</b> on <b>Ghost'S Server</b> — 100% FREE, no size limits!\n\n"
+        "⚙️ <b>Engines</b> (file bhejo → button pick karo):\n"
+        "  • ☕️ <b>JADX</b> — APK ka Java source code nikalta hai 📄\n"
+        "  • 📱 <b>Apktool</b> — APK ka Smali/XML nikalta hai 🧩\n"
+        "  • 🔨 <b>Compile APK</b> — smali/XML ZIP se signed APK banata hai 📦\n"
+        "  • ⚙️ <b>Ghidra</b> — native binaries ka C Code (NSA's RE framework) 🧠\n\n"
+        "🎯 <b>Force one engine:</b> file caption ya /link mein pehle naam likho\n"
+        "  → caption: <code>/jadx</code> or <code>/apktool</code> or <code>/apkbuild</code> or <code>/ghidra</code>\n"
+        "  → link: <code>/link jadx https://x.com/app.apk</code>\n\n"
         "📦 <b>What you get back:</b>\n"
         "  • decompiled.c — full C code of every function 🧠\n"
-        "  • info.txt — strings, symbols, compiler, architecture 📊\n"
+        "  • info.txt — strings & file details 📊\n"
+        "  • functions.txt — every function with address & size 📋\n"
+        "  • imports.txt — imported/API functions 🔌\n"
+        "  • symbols.txt — all symbols 🏷️\n"
         "  • Delivered as one neat ZIP file 📂\n\n"
         "═══════════════════════\n"
         "📤 <b>Method 1: Direct upload</b>\n"
         "Just send the file directly:\n"
         "  • .exe / .dll / .so / .elf / .apk / .zip\n"
-        "  ⚠️ Upload Limits — .so/.dex ≤100 MB, APK/ZIP ≤500 MB\n\n"
-        "⚡ <b>Features & Engines:</b>\n"
-        "  • ⚙️ <b>Ghidra Engine:</b> Full C reconstruction of native files\n"
-        "  • 📱 <b>Apktool Engine:</b> APK Decompile & Compile\n"
-        "  • 🔍 <b>Smart APK Scanner:</b> Extracts and decompiles Native .so libraries automatically\n"
-        "  • ☁️ <b>Cloud Links:</b> Large outputs (>50MB) are uploaded directly to Telegram via MTProto\n"
-        "  • 🐞 <b>GDB Debugger:</b> live commands — info functions, disassemble & more\n"
-        "  • Live progress animation (0-100%)\n\n"
-        "🎉 <b>100% FREE — NO SUBSCRIPTION NEEDED:</b>\n"
-        "  • 🆓 <b>Unlimited files / day</b> — no daily quota, no payments\n"
-        "  • 🚀 <b>Multi-File Batch ZIP Decompiler</b> (max 5 .so/.dex + 2 .apk per ZIP)\n"
-        "  • 📱 <b>Apktool Engine:</b> Full APK Decompilation & Compilation Support\n"
+        "  🚀 MTProto mode: unlimited size — send any big file directly!\n\n"
+        "📤 <b>Method 2: Link method</b> (no size limit!)\n"
+        "  Step 1: Upload file to Google Drive / MediaFire / Dropbox / GitHub / any host\n"
+        "  Step 2: Copy the shareable link\n"
+        "  Step 3: Send: <code>/link &lt;url&gt;</code>\n\n"
+        "⚡️ <b>Features:</b>\n"
+        "  • 4 engines — JADX (Java) + Apktool (smali) + Compile APK + Ghidra (C code)\n"
+        "  • Simple engine picker — file/link bhejo, button se engine chuno\n"
+        "  • Function-by-function C reconstruction\n"
+        "  • ELF / PE / Mach-O / Android APK support\n"
+        "  • Live progress animation (0-100%)\n"
         "  • 🐞 <b>GDB Debugger:</b> <code>/gdb info functions</code>, <code>/gdb disassemble main</code>\n\n"
-        "🚀 Send a file now! Powered By @Ghostofhackers",
-        parse_mode=constants.ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎉 Totally Free — No Subscription!", callback_data="buy_sub")]
-        ])
+        "🚀 Send a file or a link now! Powered By @Ghostofhackers",
+        parse_mode=constants.ParseMode.HTML
     )
 
 
@@ -490,9 +496,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🚀 <b>Send a file or a link now!</b>\n"
         "⚡ <i>Powered By @Ghostofhackers</i>"
     )
-    await update.message.reply_text(help_text, parse_mode=constants.ParseMode.HTML, reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎉 Totally Free — No Subscription!", callback_data="buy_sub")]
-    ]))
+    await update.message.reply_text(help_text, parse_mode=constants.ParseMode.HTML)
 
 
 async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -872,10 +876,7 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(
         profile_text,
-        parse_mode=constants.ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎉 100% Free — No Subscription", callback_data="buy_sub")]
-        ])
+        parse_mode=constants.ParseMode.HTML
     )
 
 
