@@ -128,8 +128,27 @@ def proc_cpu_usage(pid: int) -> int:
         return -1
 
 
+def _detect_heap_mb() -> int:
+    try:
+        with open("/proc/meminfo", "r", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    kb = int(line.split()[1])
+                    total_mb = kb // 1024
+                    if total_mb <= 0:
+                        return 4096
+                    return max(4096, min(int(total_mb * 0.7), 14336))
+    except Exception:
+        pass
+    return 4096
+
+
 def apply_memory_settings():
-    mem = os.environ.get("JAVA_MAX_MEM", "4G")
+    env_val = os.environ.get("JAVA_MAX_MEM", "").strip()
+    if env_val:
+        mem = env_val
+    else:
+        mem = f"{_detect_heap_mb()}M"
     props = GHIDRA_HOME / "support" / "launch.properties"
     try:
         text = props.read_text(errors="replace")
