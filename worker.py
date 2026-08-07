@@ -214,7 +214,28 @@ async def download_url(url: str, dest: Path, on_progress) -> str:
         raise ValueError("Could not download file from this link.")
 
 
-async def run_ghidra(file_path: Path, work_dir: Path, on_progress) -> dict:
+ELF_ARCH_REMAP = {
+    "aarch64": "ARM:LE:64:v8",
+    "arm": "ARM:LE:32:v8",
+    "x86-64": "x86:LE:64:default",
+    "x86_64": "x86:LE:64:default",
+    "intel 80386": "x86:LE:32:default",
+    "i386": "x86:LE:32:default",
+    "mips": "MIPS:LE:32:default",
+    "powerpc": "PowerPC:LE:32:default",
+    "risc-v": "RISCV:LE:64:default",
+}
+
+
+def guess_language_for(file_type: str) -> str:
+    ftype = (file_type or "").lower()
+    for key, lang in ELF_ARCH_REMAP.items():
+        if key in ftype:
+            return lang
+    return ""
+
+
+async def run_ghidra(file_path: Path, work_dir: Path, on_progress, extra_import_args=None) -> dict:
     project_dir = work_dir / "project"
     project_dir.mkdir(parents=True)
     out_c = work_dir / "decompiled.c"
@@ -231,6 +252,8 @@ async def run_ghidra(file_path: Path, work_dir: Path, on_progress) -> dict:
         str(out_c), str(out_meta),
         "-deleteProject",
     ]
+    if extra_import_args:
+        cmd[6:6] = extra_import_args
     log.info("Running: %s", " ".join(cmd))
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
@@ -605,10 +628,23 @@ async def main():
                             log.warning("Archive file %s failed: %s", bin_path.name, e)
 
         if not out_files:
+            ftype = _identify_file(dest)
+            lang = guess_language_for(ftype) if ftype else ""
+            retried = False
             try:
                 result = await asyncio.wait_for(
                     run_ghidra(dest, work_dir / "analysis", on_progress), timeout=7200
                 )
+                if not (result["c"].exists() and result["c"].stat().st_size > 0) and lang:
+                    retried = True
+                    edit(f"🔄 Import failed, retrying with explicit processor <code>{lang}</code>...", parse_mode="HTML")
+                    result = await asyncio.wait_for(
+                        run_ghidra(
+                            dest, work_dir / "analysis2", on_progress,
+                            extra_import_args=["-processor", lang],
+                        ),
+                        timeout=7200,
+                    )
                 bname = Path(filename).stem or "decompiled"
                 if result["c"].exists() and result["c"].stat().st_size > 0:
                     out_files.append((f"{bname}.c", result["c"]))
@@ -616,6 +652,9 @@ async def main():
                     out_files.append((f"{bname}_info.txt", result["meta"]))
                 if not out_files:
                     log.warning("Ghidra produced no output. tail:\n%s", result.get("tail", "")[:1500])
+                    fatal_tail = result.get("tail", "")
+                elif retried:
+                    log.info("Retry with language %s succeeded", lang)
             except TimeoutError:
                 edit("⏰ Timeout! The file is too big or complex.", keep_button=False)
                 return
@@ -627,13 +666,23 @@ async def main():
         if not out_files:
             ftype = _identify_file(dest)
             tail_snippet = ""
+            key_errors = ""
             try:
                 tail_snippet = (result.get("tail") or "")[-600:]
+                err_lines = [
+                    ln for ln in (result.get("tail") or "").splitlines()
+                    if re.search(r"(?i)(error|exception|caused by|fatal|failed|no load spec|program loader)", ln)
+                ]
+                if err_lines:
+                    key_errors = " · ".join(l.strip()[:160] for l in err_lines[-4:])
             except Exception:
                 pass
+            explain = ""
+            if key_errors:
+                explain = f"\n\n<b>Key log lines:</b>\n<pre>{key_errors[:700]}</pre>"
             edit(
                 f"❌ Analysis failed or no output files generated.\n\n"
-                f"📄 <b>File type detected:</b> {ftype[:200]}\n\n"
+                f"📄 <b>File type detected:</b> {ftype[:200]}{explain}\n\n"
                 f"<b>Ghidra log:</b>\n<pre>" + tail_snippet[:900] + "</pre>",
                 parse_mode="HTML", keep_button=False
             )
