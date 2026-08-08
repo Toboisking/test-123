@@ -616,13 +616,16 @@ async def main():
 
         async def on_progress(pct: int, label: str = "🧠 Analyzing..."):
             now = time.monotonic()
-            changed = pct > last[0] or label != last[1]
+            changed = pct >= 0 and (pct > last[0] or label != last[1])
             heartbeat = now - last[2] >= 10
             if not changed and not heartbeat:
                 return
-            last[0], last[1], last[2] = max(pct, last[0]), label, now
+            if pct >= 0:
+                last[0] = max(pct, last[0])
+            last[1], last[2] = label, now
             frame = SPIN[int(now) % len(SPIN)]
-            line = f"{label}\n{progress_bar(max(pct, 0))}"
+            bar_pct = last[0]
+            line = f"{label}\n{progress_bar(bar_pct)}"
             rem = eta_tracker.eta(pct)
             if rem is not None:
                 line += f"\n⏱️ ~{fmt_duration(rem)} remaining"
