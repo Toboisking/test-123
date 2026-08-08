@@ -306,6 +306,8 @@ async def run_ghidra(file_path: Path, work_dir: Path, on_progress, extra_import_
         "-postScript", "DecompileAll.java",
         str(out_c), str(out_meta),
         "-deleteProject",
+        "-max-cpu", "4",
+        "-analysisTimeoutPerFile", "5400",
     ]
     if extra_import_args:
         cmd[6:6] = extra_import_args
