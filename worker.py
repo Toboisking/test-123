@@ -662,7 +662,7 @@ async def main():
                         if ext == ".so":
                             candidates.append(fp)
                     else:
-                        if ext in [".so", ".dll", ".exe", ".elf", ".apk", ".bin", ".jar", ".o", ".dylib"] or (not ext and fp.stat().st_size > 1024):
+                        if ext in [".so", ".dll", ".exe", ".elf", ".apk", ".bin", ".jar", ".o", ".dylib", ".dex"] or (not ext and fp.stat().st_size > 1024):
                             candidates.append(fp)
 
             if len(candidates) > 5 and not IS_ADMIN:
@@ -684,6 +684,21 @@ async def main():
                             out_files.append((f"{bname}_info.txt", res["meta"]))
                     except Exception as e:
                         log.warning("Batch file %s failed: %s", bin_path.name, e)
+            else:
+                sample = []
+                try:
+                    with zipfile.ZipFile(dest) as zf:
+                        sample = [n for n in zf.namelist()[:12]]
+                except Exception:
+                    pass
+                edit(
+                    f"⚠️ <b>No binary files found in ZIP!</b>\n\n"
+                    f"ZIP contains text/asset files only (no .so / .dex / .jar / .elf binaries).\n"
+                    f"Sample contents: <code>{', '.join(sample[:6]) or '?'}</code>\n\n"
+                    f"Send a <b>.so/.dex/.apk</b> or a ZIP <b>containing native binaries</b>.",
+                    parse_mode="HTML", keep_button=False,
+                )
+                return
         elif not out_files:
             # Not a zip — try other archive formats (7z, tar, gz, xz, rar)
             extract_dir = work_dir / "extracted_other"
@@ -694,7 +709,7 @@ async def main():
                     for f in files:
                         fp = Path(root) / f
                         ext = fp.suffix.lower()
-                        if ext in [".so", ".dll", ".exe", ".elf", ".apk", ".bin", ".jar", ".o", ".dylib"] or (not ext and fp.stat().st_size > 1024):
+                        if ext in [".so", ".dll", ".exe", ".elf", ".apk", ".bin", ".jar", ".o", ".dylib", ".dex"] or (not ext and fp.stat().st_size > 1024):
                             candidates.append(fp)
                 if candidates:
                     edit(f"📦 <b>Archive Detected!</b> Found {len(candidates)} binary file(s). Extracting & decompiling...", parse_mode="HTML")
