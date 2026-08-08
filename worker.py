@@ -119,6 +119,39 @@ def progress_bar(pct: float) -> str:
     return f"{bar} {val:.2f} %"
 
 
+def fmt_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+class EtaTracker:
+    def __init__(self, smooth: int = 8):
+        self.samples = []  # (pct, monotonic_time)
+        self.smooth = smooth
+
+    def eta(self, pct: float) -> float | None:
+        now = time.monotonic()
+        self.samples.append((float(pct), now))
+        self.samples = self.samples[-40:]
+        if pct <= 0 or len(self.samples) < 3:
+            return None
+        recent = self.samples[-self.smooth:]
+        p0, t0 = recent[0]
+        p1, t1 = recent[-1]
+        dt = t1 - t0
+        dp = p1 - p0
+        if dt <= 0 or dp <= 0:
+            return None
+        rate = dp / dt
+        return (100 - p1) / rate
+
+
 def proc_cpu_usage(pid: int) -> int:
     try:
         with open(f"/proc/{pid}/stat") as f:
@@ -469,10 +502,15 @@ async def main():
         last = [-100.0]
 
         dl_method = ["📥 Downloading file..."]
+        dl_eta = EtaTracker()
         async def on_dl(pct: float):
             if pct < last[0] or (pct - last[0] < 2.0 and pct < 100.0): return
             last[0] = pct
-            edit(f"{dl_method[0]}\n\n{progress_bar(pct)}")
+            line = f"{dl_method[0]}\n\n{progress_bar(pct)}"
+            rem = dl_eta.eta(pct)
+            if rem is not None and pct < 100:
+                line += f"\n⏱️ ~{fmt_duration(rem)} remaining"
+            edit(line)
 
         try:
             file_id = os.environ.get("PAYLOAD_FILE_ID", "")
@@ -566,12 +604,17 @@ async def main():
             return
 
         last = [0, ""]
+        eta_tracker = EtaTracker()
 
         async def on_progress(pct: int, label: str = "🧠 Analyzing..."):
             if pct - last[0] < 5 and label == last[1]:
                 return
             last[0], last[1] = pct, label
-            edit(f"{label}\n{progress_bar(pct)}")
+            line = f"{label}\n{progress_bar(pct)}"
+            rem = eta_tracker.eta(pct)
+            if rem is not None:
+                line += f"\n⏱️ ~{fmt_duration(rem)} remaining"
+            edit(line)
 
         out_files = []
 
