@@ -28,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /opt/ghidra
-          key: ghidra-12.1.2-v2
+          key: ghidra-11.3.2-v1
 
       - name: Get Ghidra
         if: steps.ghidra-cache.outputs.cache-hit != 'true'
@@ -42,7 +42,7 @@ jobs:
             sudo rm -rf /opt/ghidra
           fi
           curl -L --retry 3 -o /tmp/ghidra.zip \
-            "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip"
+            "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.3.2_build/ghidra_11.3.2_PUBLIC_20250415.zip"
           sudo unzip -q -o /tmp/ghidra.zip -d /opt
           ghdir=$(sudo bash -c 'ls -d /opt/ghidra_* 2>/dev/null | head -n1')
           echo "extracted dir: $ghdir"
