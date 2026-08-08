@@ -136,8 +136,11 @@ class EtaTracker:
         self.smooth = smooth
 
     def eta(self, pct: float) -> float | None:
+        pct = float(pct)
+        if pct < 0:
+            return None
         now = time.monotonic()
-        self.samples.append((float(pct), now))
+        self.samples.append((pct, now))
         self.samples = self.samples[-40:]
         if pct <= 0 or len(self.samples) < 3:
             return None
@@ -314,6 +317,8 @@ async def run_ghidra(file_path: Path, work_dir: Path, on_progress, extra_import_
     tail = []
     await on_progress(5, "📥 Importing file into Ghidra...")
 
+    SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
     async def read_stream():
         last_activity = time.monotonic()
         last_cpu = proc_cpu_usage(proc.pid)
@@ -322,7 +327,7 @@ async def run_ghidra(file_path: Path, work_dir: Path, on_progress, extra_import_
                 proc.kill()
                 raise JobCancelled()
             try:
-                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=60)
+                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=20)
                 last_activity = time.monotonic()
             except asyncio.TimeoutError:
                 cpu = proc_cpu_usage(proc.pid)
@@ -332,6 +337,7 @@ async def run_ghidra(file_path: Path, work_dir: Path, on_progress, extra_import_
                 elif time.monotonic() - last_activity >= 1800:
                     proc.kill()
                     raise RuntimeError("Ghidra stalled: no CPU activity for 30 minutes")
+                await on_progress(-1, "🔧 Analyzing binary with Ghidra...")
                 continue
             if not raw:
                 break
@@ -495,6 +501,7 @@ async def main():
     edit("🟢 Job started! Preparing Ghidra engine on cloud server...", parse_mode="HTML")
     apply_memory_settings()
 
+    job_start = time.monotonic()
     work_dir = Path(tempfile.gettempdir()) / ("ghidra_" + os.urandom(8).hex())
     try:
         work_dir.mkdir(parents=True)
@@ -603,17 +610,24 @@ async def main():
             await run_gdb(dest, work_dir)
             return
 
-        last = [0, ""]
+        last = [0, "", time.monotonic()]
         eta_tracker = EtaTracker()
+        SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
         async def on_progress(pct: int, label: str = "🧠 Analyzing..."):
-            if pct - last[0] < 5 and label == last[1]:
+            now = time.monotonic()
+            changed = pct > last[0] or label != last[1]
+            heartbeat = now - last[2] >= 10
+            if not changed and not heartbeat:
                 return
-            last[0], last[1] = pct, label
-            line = f"{label}\n{progress_bar(pct)}"
+            last[0], last[1], last[2] = max(pct, last[0]), label, now
+            frame = SPIN[int(now) % len(SPIN)]
+            line = f"{label}\n{progress_bar(max(pct, 0))}"
             rem = eta_tracker.eta(pct)
             if rem is not None:
                 line += f"\n⏱️ ~{fmt_duration(rem)} remaining"
+            else:
+                line += f"\n{frame} working... {fmt_duration(now - job_start)} elapsed"
             edit(line)
 
         out_files = []
