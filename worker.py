@@ -196,6 +196,10 @@ def apply_memory_settings():
         log.info("JAVA_MAX_MEM set to %s", mem)
     except Exception as e:
         log.warning("Could not set JAVA_MAX_MEM: %s", e)
+    # Ghidra 11.x+ reads heap from these env vars (launch.properties is ignored for memory).
+    os.environ["GHIDRA_MAXMEM"] = mem
+    os.environ["GHIDRA_HEADLESS_MAXMEM"] = mem
+    log.info("GHIDRA_MAXMEM/GHIDRA_HEADLESS_MAXMEM set to %s", mem)
 
 
 def resolve_drive_url(url: str):
